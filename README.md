@@ -35,13 +35,23 @@ ContextForge e uma plataforma self-hosted para transformar fontes de dados em to
 
 ## Inicio rapido com Docker
 
-Crie o arquivo `.env` a partir do exemplo:
+Crie o arquivo `.env` a partir do exemplo.
+
+Linux/macOS:
 
 ```bash
 cp .env.example .env
 ```
 
-Gere valores seguros para `MASTER_KEY` e `JWT_SECRET`:
+Windows (PowerShell):
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Gere valores seguros para `MASTER_KEY` e `JWT_SECRET`.
+
+Linux/macOS:
 
 ```bash
 export MASTER_KEY="$(openssl rand -base64 32)"
@@ -57,6 +67,23 @@ content = content.replace("CHANGE_ME_BASE64_32BYTES", os.environ["MASTER_KEY"], 
 content = content.replace("CHANGE_ME_LONG_RANDOM_STRING", os.environ["JWT_SECRET"], 1)
 env_file.write_text(content)
 PY
+```
+
+Windows (PowerShell):
+
+```powershell
+$bytes = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+$masterKey = [Convert]::ToBase64String($bytes)
+
+$jwtBytes = New-Object byte[] 48
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($jwtBytes)
+$jwtSecret = [Convert]::ToBase64String($jwtBytes)
+
+(Get-Content .env) `
+  -replace 'CHANGE_ME_BASE64_32BYTES', $masterKey `
+  -replace 'CHANGE_ME_LONG_RANDOM_STRING', $jwtSecret `
+  | Set-Content .env
 ```
 
 Edite tambem no `.env`:
