@@ -1,0 +1,3 @@
+ALTER TABLE tools
+    DROP COLUMN IF EXISTS chat_log,
+    DROP COLUMN IF EXISTS last_test;

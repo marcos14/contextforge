@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./node_modules/.bin/tsc --noEmit -p .)",
+      "Bash(xargs sed -i 's|github.com/marcos14/db-mcp-builder/backend|github.com/marcos14/contextforge/backend|g')",
+      "Bash(sed -i 's/MCPBuilder/ContextForge/g; s/mcpbuilder/contextforge/g; s/db-mcp-builder/contextforge/g' \"c:/Projetos/MA/contextforge/README.md\")",
+      "Bash(sed -i 's/MCPBuilder/ContextForge/g; s/mcpbuilder/contextforge/g; s/db-mcp-builder/contextforge/g' \"c:/Projetos/MA/contextforge/AGENT.md\")",
+      "Bash(sed -i 's/MCPBuilder/ContextForge/g; s/mcpbuilder/contextforge/g; s/db-mcp-builder/contextforge/g' \"c:/Projetos/MA/contextforge/CLAUDE.md\")",
+      "Bash(sed -i 's/MCPBuilder/ContextForge/g; s/mcpbuilder/contextforge/g; s/db-mcp-builder/contextforge/g' \"c:/Projetos/MA/contextforge/CONTRIBUTING.md\")",
+      "Bash(sed -i 's/MCPBuilder/ContextForge/g; s/mcpbuilder/contextforge/g; s/db-mcp-builder/contextforge/g' \"c:/Projetos/MA/contextforge/SECURITY.md\")",
+      "Bash(docker run *)",
+      "PowerShell(docker run --rm --mount \"type=bind,source=C:\\\\Projetos\\\\MA\\\\contextforge\\\\backend,target=/app\" -w /app golang:latest go build ./... 2>&1)",
+      "PowerShell(docker run --rm --mount \"type=bind,source=C:\\\\Projetos\\\\MA\\\\contextforge\\\\backend,target=/app\" -w /app golang:latest sh -c \"go build ./... 2>&1 && echo 'BUILD OK'\" 2>&1)",
+      "PowerShell(docker run --rm --mount \"type=bind,source=C:\\\\Projetos\\\\MA\\\\contextforge\\\\backend,target=/app\" -w /app golang:latest sh -c \"go test ./... 2>&1\" 2>&1)",
+      "Bash(npm run *)",
+      "Bash(ls /c/Program*/nodejs/npm*)",
+      "Read(//usr/local/bin/**)",
+      "Read(//c/Program Files/**)",
+      "Read(//c/Users/marco/AppData/Roaming/**)",
+      "Read(//c/Users/marco/.nvm/**)",
+      "PowerShell(docker run --rm --mount \"type=bind,source=C:\\\\Projetos\\\\MA\\\\contextforge\\\\backend,target=/app\" -w /app golang:latest sh -c \"go build ./... && echo 'BUILD OK' || echo 'BUILD FAILED'\" 2>&1)",
+      "PowerShell(tail -5)",
+      "PowerShell(docker run --rm --mount \"type=bind,source=C:\\\\Projetos\\\\MA\\\\contextforge\\\\backend,target=/app\" -w /app golang:latest sh -c \"go build ./... && echo BUILD_OK\" 2>&1)",
+      "PowerShell(docker run --rm --mount \"type=bind,source=C:\\\\Projetos\\\\MA\\\\contextforge\\\\backend,target=/app\" -w /app golang:latest sh -c \"go test -v ./... 2>&1\" 2>&1)",
+      "PowerShell(Set-Location \"C:\\\\Projetos\\\\MA\\\\contextforge\\\\frontend\"; $result = .\\\\node_modules\\\\.bin\\\\tsc --noEmit -p . 2>&1; Write-Output \"EXIT: $LASTEXITCODE\"; Write-Output $result)",
+      "Bash(node node_modules/.bin/tsc --noEmit -p .)",
+      "Bash(echo \"Exit: $?\")",
+      "PowerShell(Get-Command node, npm -ErrorAction SilentlyContinue)",
+      "PowerShell($env:PATH -split \";\" | Where-Object { $_ -match \"node|nvm|volta\" })"
+    ]
+  }
+}

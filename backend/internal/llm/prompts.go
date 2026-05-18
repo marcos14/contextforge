@@ -1,0 +1,474 @@
+package llm
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/marcos14/contextforge/backend/internal/drivers"
+)
+
+// GenerateQueryInput is the input to GenerateQuery.
+type GenerateQueryInput struct {
+	ConnectionKind string
+	Tables         []drivers.Table
+	UserPrompt     string
+}
+
+// GenerateQueryOutput is the model's structured response.
+type GenerateQueryOutput struct {
+	Query  string         `json:"query"`
+	Params []ParamSpec    `json:"params"`
+	Notes  string         `json:"notes,omitempty"`
+	Raw    map[string]any `json:"-"`
+}
+
+type ParamSpec struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`                 // string|number|integer|boolean|array
+	ItemsType   string `json:"items_type,omitempty"` // required when Type=="array" (string|number|integer|boolean)
+	Description string `json:"description"`
+	Required    bool   `json:"required"`
+}
+
+const genQuerySystem = `You are an expert data engineer. The user will describe what they want
+extracted from a database. You must produce a single SELECT-only query
+(no INSERT/UPDATE/DELETE/DDL) using named parameters with the syntax :name.
+
+Rules:
+- Only SELECT or WITH ... SELECT statements.
+- Use placeholders :param_name for any user-supplied input.
+- Do not concatenate untrusted strings.
+- Do not invent tables/columns; use only those provided.
+- Prefer explicit column lists over SELECT *.
+- For Mongo connections, output a JSON spec instead of SQL with this shape:
+  {"collection":"...","find":{"filter":{...},"limit":N}}
+  or {"collection":"...","aggregate":[{...}, ...]}.
+  Replace user input with the literal string "$param:<name>".
+
+Respond strictly as JSON with this schema:
+{"query": "<string>",
+ "params": [{"name":"...", "type":"string|number|integer|boolean|array", "items_type":"string|number|integer|boolean (only when type==array)", "description":"...", "required":true|false}],
+ "notes": "<optional explanation>"}`
+
+// GenerateQuery asks the model to produce a query and params spec.
+func (c *Client) GenerateQuery(ctx context.Context, in GenerateQueryInput) (*GenerateQueryOutput, error) {
+	var sb strings.Builder
+	sb.WriteString("Connection kind: ")
+	sb.WriteString(in.ConnectionKind)
+	sb.WriteString("\n\nAvailable tables:\n")
+	for _, t := range in.Tables {
+		name := t.Name
+		if t.Schema != "" {
+			name = t.Schema + "." + t.Name
+		}
+		fmt.Fprintf(&sb, "- %s\n", name)
+		for _, col := range t.Columns {
+			fmt.Fprintf(&sb, "    %s %s%s\n", col.Name, col.Type, nullableTag(col.Nullable))
+		}
+	}
+	sb.WriteString("\nUser request:\n")
+	sb.WriteString(in.UserPrompt)
+
+	raw, err := c.Chat(ctx, []Message{
+		{Role: "system", Content: genQuerySystem},
+		{Role: "user", Content: sb.String()},
+	}, true)
+	if err != nil {
+		return nil, err
+	}
+	out := &GenerateQueryOutput{}
+	if err := json.Unmarshal([]byte(raw), out); err != nil {
+		return nil, fmt.Errorf("llm output is not valid JSON: %w (raw=%s)", err, truncate(raw, 256))
+	}
+	if out.Query == "" {
+		return nil, fmt.Errorf("llm returned empty query")
+	}
+	return out, nil
+}
+
+func nullableTag(n bool) string {
+	if n {
+		return " NULL"
+	}
+	return " NOT NULL"
+}
+
+// DocumentToolInput feeds the documenter prompt.
+type DocumentToolInput struct {
+	Query        string
+	Params       []ParamSpec
+	SampleResult *drivers.ExecResult
+}
+
+// DocumentToolOutput contains the generated documentation.
+type DocumentToolOutput struct {
+	Title        string          `json:"title"`
+	Description  string          `json:"description"`
+	ParamsSchema json.RawMessage `json:"params_schema"`
+	OutputSchema json.RawMessage `json:"output_schema"`
+}
+
+const docSystem = `You document a database-backed tool that will be exposed via the Model
+Context Protocol. Given the query, declared parameters, and a sample result,
+produce:
+
+- a concise human-friendly title (max 80 chars)
+- a description (1-3 sentences) explaining when an AI agent should call the
+  tool and what it returns;
+- a JSON Schema (params_schema) for the parameters, suitable for MCP tool
+  definitions ("type":"object","properties":{...},"required":[...]);
+- a JSON Schema (output_schema) describing the shape of the result.
+
+Respond strictly as JSON with this shape:
+{"title":"...","description":"...","params_schema":{...},"output_schema":{...}}`
+
+// DocumentTool returns generated documentation for a tool.
+func (c *Client) DocumentTool(ctx context.Context, in DocumentToolInput) (*DocumentToolOutput, error) {
+	var sb strings.Builder
+	sb.WriteString("Query:\n")
+	sb.WriteString(in.Query)
+	sb.WriteString("\n\nDeclared parameters:\n")
+	for _, p := range in.Params {
+		fmt.Fprintf(&sb, "- %s (%s, required=%v): %s\n", p.Name, p.Type, p.Required, p.Description)
+	}
+	if in.SampleResult != nil {
+		b, _ := json.MarshalIndent(in.SampleResult, "", "  ")
+		sb.WriteString("\nSample result (truncated):\n")
+		sb.WriteString(truncate(string(b), 4000))
+	}
+	raw, err := c.Chat(ctx, []Message{
+		{Role: "system", Content: docSystem},
+		{Role: "user", Content: sb.String()},
+	}, true)
+	if err != nil {
+		return nil, err
+	}
+	out := &DocumentToolOutput{}
+	if err := json.Unmarshal([]byte(raw), out); err != nil {
+		return nil, fmt.Errorf("llm output is not valid JSON: %w (raw=%s)", err, truncate(raw, 256))
+	}
+	return out, nil
+}
+
+// ChatToolInput is the input to ChatTool: a conversation with the LLM where
+// the user iteratively describes the tool they want to build.
+type ChatToolInput struct {
+	ConnectionKind string
+	Tables         []drivers.Table
+	History        []Message
+	Current        *CurrentTool
+}
+
+// CurrentTool describes the tool currently loaded in the editor form. When
+// provided, the assistant should treat it as the working draft and help the
+// user iterate on it (refactor the query, tweak params, improve docs) instead
+// of designing a brand-new tool from scratch.
+type CurrentTool struct {
+	Editing      bool            `json:"editing"`
+	Slug         string          `json:"slug,omitempty"`
+	Title        string          `json:"title,omitempty"`
+	Description  string          `json:"description,omitempty"`
+	QueryText    string          `json:"query_text,omitempty"`
+	ParamsSchema json.RawMessage `json:"params_schema,omitempty"`
+}
+
+// ChatToolOutput is a structured assistant turn. Reply is always present and
+// shown to the user. When the assistant is confident enough to propose a
+// query, Query/Params are populated so the UI can offer "Use this query".
+type ChatToolOutput struct {
+	Reply       string      `json:"reply"`
+	Query       string      `json:"query,omitempty"`
+	Params      []ParamSpec `json:"params,omitempty"`
+	Slug        string      `json:"slug,omitempty"`
+	Title       string      `json:"title,omitempty"`
+	Description string      `json:"description,omitempty"`
+	Notes       string      `json:"notes,omitempty"`
+}
+
+const chatToolSystem = `You help an engineer design a database-backed tool that will be exposed
+via the Model Context Protocol. You converse with the user in their language
+(default: Portuguese) and, when you have enough information, propose a single
+SELECT-only query (no INSERT/UPDATE/DELETE/DDL) using named parameters :name.
+
+Behaviour:
+- Ask short, targeted follow-up questions when the request is ambiguous.
+- Only use tables/columns provided in the system context. If something is
+  missing, ask the user instead of guessing.
+- Prefer explicit column lists over SELECT *.
+- Optional parameters MUST be handled with a NULL-tolerant pattern such as
+  "(:name IS NULL OR column = :name)" so the dry-run with NULL values works.
+- For parameters that accept multiple values (e.g. lists of ids), declare
+  them with type="array" and a matching items_type (string/integer/...).
+  Use the dialect's array operator (Postgres: "column = ANY(:name)";
+  MySQL/Oracle/MSSQL: prefer a single id parameter, or document that the
+  caller must pass a comma-separated string the query splits).
+- For Mongo connections, output a JSON spec instead of SQL:
+  {"collection":"...","find":{"filter":{...},"limit":N}}
+  or {"collection":"...","aggregate":[{...}, ...]}.
+  Replace user input with the literal string "$param:<name>".
+- Never invent data. If unsure, say so.
+
+Always respond strictly as JSON with this schema:
+{
+  "reply": "<message shown in the chat, plain prose, in the user's language>",
+  "query": "<optional: the proposed query, only when you are proposing one>",
+  "params": [{"name":"...","type":"string|number|integer|boolean|array","items_type":"string|number|integer|boolean (only when type==array)","description":"...","required":true|false}],
+  "slug": "<optional: short snake_case identifier matching [a-z0-9_]{1,64}>",
+  "title": "<optional: short human title, max 80 chars>",
+  "description": "<optional: 1-3 sentence description for an AI agent>",
+  "notes": "<optional short explanation of trade-offs>"
+}
+
+Rules for the JSON:
+- "reply" is REQUIRED and must always be non-empty.
+- Omit "query", "params", "slug", "title", "description" while you are still
+  gathering information.
+- Whenever you include "query", ALSO include matching "slug", "title" and
+  "description" so the user can save the tool with one click.`
+
+// ChatTool runs one turn of the tool-design conversation.
+func (c *Client) ChatTool(ctx context.Context, in ChatToolInput) (*ChatToolOutput, error) {
+	var sb strings.Builder
+	sb.WriteString("Connection kind: ")
+	sb.WriteString(in.ConnectionKind)
+	sb.WriteString("\n\nAvailable tables:\n")
+	if len(in.Tables) == 0 {
+		sb.WriteString("(none provided yet — ask the user to run \"Carregar schema\" if you need column details)\n")
+	}
+	for _, t := range in.Tables {
+		name := t.Name
+		if t.Schema != "" {
+			name = t.Schema + "." + t.Name
+		}
+		fmt.Fprintf(&sb, "- %s\n", name)
+		for _, col := range t.Columns {
+			fmt.Fprintf(&sb, "    %s %s%s\n", col.Name, col.Type, nullableTag(col.Nullable))
+		}
+	}
+
+	msgs := []Message{
+		{Role: "system", Content: chatToolSystem},
+		{Role: "system", Content: sb.String()},
+	}
+	if in.Current != nil && (in.Current.QueryText != "" || in.Current.Slug != "" || in.Current.Title != "" || in.Current.Description != "" || len(in.Current.ParamsSchema) > 0) {
+		var cb strings.Builder
+		if in.Current.Editing {
+			cb.WriteString("The user is EDITING an existing tool. Treat the fields below as the current draft and help them iterate on it (refactor the query, tweak params, improve title/description). Only propose a brand-new query if the user explicitly asks for one.\n\n")
+		} else {
+			cb.WriteString("The user already has the following draft in the form. Use it as the starting point when proposing changes.\n\n")
+		}
+		if in.Current.Slug != "" {
+			fmt.Fprintf(&cb, "Slug: %s\n", in.Current.Slug)
+		}
+		if in.Current.Title != "" {
+			fmt.Fprintf(&cb, "Title: %s\n", in.Current.Title)
+		}
+		if in.Current.Description != "" {
+			fmt.Fprintf(&cb, "Description: %s\n", in.Current.Description)
+		}
+		if in.Current.QueryText != "" {
+			cb.WriteString("Current query:\n")
+			cb.WriteString(in.Current.QueryText)
+			cb.WriteString("\n")
+		}
+		if len(in.Current.ParamsSchema) > 0 && string(in.Current.ParamsSchema) != "null" {
+			cb.WriteString("Current params_schema (JSON Schema):\n")
+			cb.Write(in.Current.ParamsSchema)
+			cb.WriteString("\n")
+		}
+		msgs = append(msgs, Message{Role: "system", Content: cb.String()})
+	}
+	msgs = append(msgs, in.History...)
+
+	raw, err := c.Chat(ctx, msgs, true)
+	if err != nil {
+		return nil, err
+	}
+	out := &ChatToolOutput{}
+	if err := json.Unmarshal([]byte(raw), out); err != nil {
+		return nil, fmt.Errorf("llm output is not valid JSON: %w (raw=%s)", err, truncate(raw, 256))
+	}
+	if out.Reply == "" {
+		return nil, fmt.Errorf("llm returned empty reply")
+	}
+	return out, nil
+}
+
+// ============== Code-tool generation ==============
+
+// AvailableConnection describes one connection the JS runtime can target
+// via db("<name>", ...). Used by GenerateCode to ground the LLM.
+type AvailableConnection struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// AvailableTool describes one already-active tool the JS runtime can compose
+// via tools.call("<slug>", params). Used by GenerateCode.
+type AvailableTool struct {
+	Slug        string `json:"slug"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// GenerateCodeInput is the input to GenerateCode.
+type GenerateCodeInput struct {
+	UserPrompt  string
+	Connections []AvailableConnection
+	Tools       []AvailableTool
+	History     []Message
+	Current     *CurrentTool
+}
+
+// GenerateCodeOutput is the LLM's structured response for a JS code-tool.
+type GenerateCodeOutput struct {
+	Reply       string      `json:"reply,omitempty"`
+	Code        string      `json:"code"`
+	Params      []ParamSpec `json:"params"`
+	Slug        string      `json:"slug,omitempty"`
+	Title       string      `json:"title,omitempty"`
+	Description string      `json:"description,omitempty"`
+	Notes       string      `json:"notes,omitempty"`
+}
+
+const genCodeSystem = `You are an expert backend engineer helping the user design a tool exposed
+via the Model Context Protocol. The tool body is a JavaScript snippet (ES5.1
++ most ES6) that runs in a sandboxed embedded VM with these globals:
+
+  params              // object with validated input params (declared below)
+  context.token_id    // current MCP token UUID (string)
+  db(connName, sql, params)        // run a SELECT against an existing
+                                   // connection by name; returns
+                                   // { rows: [...], columns: [...], count }
+                                   // Use :name placeholders for SQL params.
+  tools.call(slug, params)         // invoke another active tool; returns
+                                   // the same { rows, columns, count } shape
+  fetch(url, opts)                 // synchronous HTTP. opts: { method,
+                                   // headers, query, body }. Returns
+                                   // { status, headers, body, json() }.
+  log(...args), console.log(...)
+
+Conversation rules:
+- Converse in the user's language (default: Portuguese).
+- Read the chat history. The user iterates: each new message refines the
+  previous draft. Update the snippet to reflect the LATEST request, not the
+  first one. Do NOT keep features the user explicitly dropped.
+- If the request is ambiguous, ask a short follow-up question in "reply" and
+  return an empty "code". Otherwise produce a complete, working snippet.
+
+Code rules:
+- Output MUST be plain JavaScript with a top-level "return" statement
+  (the snippet is wrapped in an IIFE by the runtime).
+- DO NOT use async/await, Promises, require, import, or Node APIs.
+  The runtime is single-threaded and synchronous.
+- Implement the actual logic the user asked for. Never return a placeholder
+  like { value: 'ready' } unless the user explicitly asks for a stub.
+- Prefer returning { rows: [...], columns: [...] }. Scalars become a single
+  { value: ... } row automatically.
+- Validate inputs early; throw on invalid combinations.
+- IMPORTANT: when checking for "required" parameters, use
+  "params.x === undefined" or "params.x == null". Do NOT write
+  "if (!params.x)" because the dry-run passes zero defaults for numeric
+  params (0), empty strings for string params, and false for booleans -
+  all of which are falsy but valid inputs, and your validation would
+  reject them.
+- For enum-style string params, accept the dry-run empty default by
+  short-circuiting at the very top (e.g. "if (params.operation === '')
+  return { rows: [] };") OR by listing the enum in the params_schema
+  description so the user knows which values are accepted.
+- Use only the connections and tools provided in the system context.
+- Use :name placeholders for SQL params (never concatenate user input).
+- CRITICAL: inside SQL passed to db(connName, sql, params), reference tables
+  as "schema.table" (or just "table"), NEVER as "connName.schema.table".
+  The connection name is already selected by the first argument to db();
+  prefixing it inside the SQL causes "cross-database references" errors on
+  PostgreSQL/SQL Server. Example: db("agronavis_dev", "SELECT ... FROM hub.geom_city WHERE ...", {...})
+  - NOT "FROM agronavis_dev.hub.geom_city".
+- The user may mention tables in chat using "@conn.schema.table" syntax for
+  disambiguation; strip the connection prefix when writing the SQL.
+
+Also propose a slug (a-z0-9_, max 64), a short Title and a one-line
+Description for the tool. Reuse the user's terminology.
+
+Respond strictly as JSON:
+{
+  "reply": "<short message to the user, same language as the user>",
+  "code": "<javascript snippet, with a top-level return; empty if you only have a follow-up question>",
+  "slug": "<lower_snake_case>",
+  "title": "<short title>",
+  "description": "<one-line description>",
+  "params": [{"name":"...","type":"string|number|integer|boolean|array",
+              "items_type":"string|number|integer|boolean (when type==array)",
+              "description":"...","required":true|false}],
+  "notes": "<optional short explanation of the snippet>"
+}`
+
+// GenerateCode asks the model to produce a JS code-tool body + params spec.
+func (c *Client) GenerateCode(ctx context.Context, in GenerateCodeInput) (*GenerateCodeOutput, error) {
+	var sb strings.Builder
+	sb.WriteString("Available connections (use via db(<name>, ...)):\n")
+	if len(in.Connections) == 0 {
+		sb.WriteString("(none configured)\n")
+	}
+	for _, conn := range in.Connections {
+		fmt.Fprintf(&sb, "- %s (%s)\n", conn.Name, conn.Type)
+	}
+	sb.WriteString("\nAvailable tools (use via tools.call(<slug>, params)):\n")
+	if len(in.Tools) == 0 {
+		sb.WriteString("(none)\n")
+	}
+	for _, t := range in.Tools {
+		fmt.Fprintf(&sb, "- %s - %s\n", t.Slug, t.Title)
+		if t.Description != "" {
+			fmt.Fprintf(&sb, "    %s\n", t.Description)
+		}
+	}
+
+	msgs := []Message{
+		{Role: "system", Content: genCodeSystem},
+		{Role: "system", Content: sb.String()},
+	}
+	if in.Current != nil && (in.Current.QueryText != "" || in.Current.Slug != "" || in.Current.Title != "" || in.Current.Description != "") {
+		var cb strings.Builder
+		if in.Current.Editing {
+			cb.WriteString("The user is EDITING an existing tool. Treat the fields below as the current draft and help them iterate on it.\n\n")
+		} else {
+			cb.WriteString("The user already has the following draft in the form. Use it as the starting point.\n\n")
+		}
+		if in.Current.Slug != "" {
+			fmt.Fprintf(&cb, "Slug: %s\n", in.Current.Slug)
+		}
+		if in.Current.Title != "" {
+			fmt.Fprintf(&cb, "Title: %s\n", in.Current.Title)
+		}
+		if in.Current.Description != "" {
+			fmt.Fprintf(&cb, "Description: %s\n", in.Current.Description)
+		}
+		if in.Current.QueryText != "" {
+			cb.WriteString("Current code:\n")
+			cb.WriteString(in.Current.QueryText)
+			cb.WriteString("\n")
+		}
+		msgs = append(msgs, Message{Role: "system", Content: cb.String()})
+	}
+	if len(in.History) > 0 {
+		msgs = append(msgs, in.History...)
+	} else if in.UserPrompt != "" {
+		msgs = append(msgs, Message{Role: "user", Content: in.UserPrompt})
+	}
+
+	raw, err := c.Chat(ctx, msgs, true)
+	if err != nil {
+		return nil, err
+	}
+	out := &GenerateCodeOutput{}
+	if err := json.Unmarshal([]byte(raw), out); err != nil {
+		return nil, fmt.Errorf("llm output is not valid JSON: %w (raw=%s)", err, truncate(raw, 256))
+	}
+	if out.Code == "" && out.Reply == "" {
+		return nil, fmt.Errorf("llm returned empty response")
+	}
+	return out, nil
+}

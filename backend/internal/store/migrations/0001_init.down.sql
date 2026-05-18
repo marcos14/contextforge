@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS tool_executions;
+DROP TABLE IF EXISTS group_visibility_overrides;
+DROP TABLE IF EXISTS token_grants;
+DROP TABLE IF EXISTS tokens;
+DROP TABLE IF EXISTS tool_versions;
+DROP TABLE IF EXISTS tools;
+DROP TABLE IF EXISTS tool_groups;
+DROP TABLE IF EXISTS connections;
+DROP TABLE IF EXISTS users;

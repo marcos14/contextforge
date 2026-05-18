@@ -1,0 +1,78 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mcpb-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: contextforge
+      POSTGRES_PASSWORD: contextforge
+      POSTGRES_DB: contextforge
+    volumes:
+      - mcpb_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U contextforge -d contextforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    container_name: mcpb-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - mcpb_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "6379:6379"
+
+  contextforge:
+    build:
+      context: ..
+      dockerfile: deploy/backend.Dockerfile
+    container_name: mcpb-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgres://contextforge:contextforge@postgres:5432/contextforge?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8080:8080"
+
+  # Optional profile: image bundled with Oracle Instant Client (godror).
+  # Activate with: docker compose --profile oracle up
+  contextforge-oracle:
+    profiles: ["oracle"]
+    build:
+      context: ..
+      dockerfile: deploy/backend.oracle.Dockerfile
+    container_name: mcpb-app-oracle
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgres://contextforge:contextforge@postgres:5432/contextforge?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8081:8080"
+
+volumes:
+  mcpb_pg_data:
+  mcpb_redis_data:
