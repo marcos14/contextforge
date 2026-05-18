@@ -35,13 +35,41 @@ ContextForge e uma plataforma self-hosted para transformar fontes de dados em to
 
 ## Inicio rapido com Docker
 
-Crie o arquivo `.env` a partir do exemplo:
+Crie o arquivo `.env` a partir do exemplo.
+
+Linux/macOS:
+
+```bash
+cp .env.example .env
+```
+
+Windows (PowerShell):
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Gere valores seguros para `MASTER_KEY` e `JWT_SECRET`:
+Gere valores seguros para `MASTER_KEY` e `JWT_SECRET`.
+
+Linux/macOS:
+
+```bash
+export MASTER_KEY="$(openssl rand -base64 32)"
+export JWT_SECRET="$(openssl rand -base64 48)"
+
+python3 - <<'PY'
+from pathlib import Path
+import os
+
+env_file = Path(".env")
+content = env_file.read_text()
+content = content.replace("CHANGE_ME_BASE64_32BYTES", os.environ["MASTER_KEY"], 1)
+content = content.replace("CHANGE_ME_LONG_RANDOM_STRING", os.environ["JWT_SECRET"], 1)
+env_file.write_text(content)
+PY
+```
+
+Windows (PowerShell):
 
 ```powershell
 $bytes = New-Object byte[] 32
