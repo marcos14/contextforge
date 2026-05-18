@@ -35,5 +35,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /out/contextforge /app/contextforge
 COPY --from=web   /web/dist /app/frontend/dist
 WORKDIR /app
-EXPOSE 8080
+ARG APP_PORT=8080
+EXPOSE ${APP_PORT}
 ENTRYPOINT ["/app/contextforge"]
