@@ -37,25 +37,26 @@ ContextForge e uma plataforma self-hosted para transformar fontes de dados em to
 
 Crie o arquivo `.env` a partir do exemplo:
 
-```powershell
-Copy-Item .env.example .env
+```bash
+cp .env.example .env
 ```
 
 Gere valores seguros para `MASTER_KEY` e `JWT_SECRET`:
 
-```powershell
-$bytes = New-Object byte[] 32
-[System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-$masterKey = [Convert]::ToBase64String($bytes)
+```bash
+export MASTER_KEY="$(openssl rand -base64 32)"
+export JWT_SECRET="$(openssl rand -base64 48)"
 
-$jwtBytes = New-Object byte[] 48
-[System.Security.Cryptography.RandomNumberGenerator]::Fill($jwtBytes)
-$jwtSecret = [Convert]::ToBase64String($jwtBytes)
+python3 - <<'PY'
+from pathlib import Path
+import os
 
-(Get-Content .env) `
-  -replace 'CHANGE_ME_BASE64_32BYTES', $masterKey `
-  -replace 'CHANGE_ME_LONG_RANDOM_STRING', $jwtSecret `
-  | Set-Content .env
+env_file = Path(".env")
+content = env_file.read_text()
+content = content.replace("CHANGE_ME_BASE64_32BYTES", os.environ["MASTER_KEY"], 1)
+content = content.replace("CHANGE_ME_LONG_RANDOM_STRING", os.environ["JWT_SECRET"], 1)
+env_file.write_text(content)
+PY
 ```
 
 Edite tambem no `.env`:
