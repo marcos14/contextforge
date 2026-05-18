@@ -71,7 +71,7 @@ cd deploy
 docker compose up --build
 ```
 
-A UI ficara em <http://localhost:8080>.
+A UI ficara em <http://localhost:8080> (porta padrao; ajuste via `CONTEXTFORGE_HOST_PORT` no `.env`).
 
 O endpoint MCP ficara em <http://localhost:8080/mcp>. Use o header `Authorization: Bearer <token>` com um token criado na tela **Tokens**.
 
@@ -100,7 +100,7 @@ npm install
 npm run dev
 ```
 
-O Vite roda em <http://localhost:5173> e faz proxy de `/api` e `/mcp` para o backend.
+O Vite roda em <http://localhost:5173> e faz proxy de `/api` e `/mcp` para o backend (ajuste via `VITE_DEV_PORT` e `VITE_BACKEND_URL` no `.env`).
 
 ## Variaveis de ambiente
 

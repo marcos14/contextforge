@@ -24,6 +24,7 @@ RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=build /out/contextforge /app/contextforge
 COPY --from=web /web/dist /app/frontend/dist
-EXPOSE 8080
+ARG APP_PORT=8080
+EXPOSE ${APP_PORT}
 USER nobody
 ENTRYPOINT ["/app/contextforge"]
