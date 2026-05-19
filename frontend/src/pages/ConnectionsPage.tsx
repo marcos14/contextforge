@@ -78,11 +78,17 @@ const CONFIG_EXAMPLES: Record<string, { label: string; description: string; conf
   },
 };
 
+// Must mirror the backend regex in handlers_connections.go::connectionNameRe.
+const CONNECTION_NAME_RE = /^[a-z0-9_-]{1,64}$/;
+
 export function ConnectionsPage() {
   const qc = useQueryClient();
   const emptyForm = { name: "", type: "pg", description: "", config: '{"dsn":"postgres://..."}' };
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // Tracked separately so we can grandfather legacy names: if the user is
+  // editing and didn't touch the name, skip client-side validation.
+  const [originalName, setOriginalName] = useState<string | null>(null);
   const [showExamples, setShowExamples] = useState(false);
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -105,7 +111,9 @@ export function ConnectionsPage() {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const start = total === 0 ? 0 : (page - 1) * pageSize;
   const end = start + items.length;
-  const resetForm = () => { setEditingId(null); setForm(emptyForm); };
+  const resetForm = () => { setEditingId(null); setOriginalName(null); setForm(emptyForm); };
+  const nameChanged = originalName === null || form.name !== originalName;
+  const nameInvalid = nameChanged && form.name !== "" && !CONNECTION_NAME_RE.test(form.name);
   const save = useMutation({
     mutationFn: () => {
       const body = JSON.stringify({ ...form, config: JSON.parse(form.config) });
@@ -119,6 +127,7 @@ export function ConnectionsPage() {
     try {
       const c = await api<any>(`/api/connections/${id}`);
       setEditingId(id);
+      setOriginalName(c.name);
       setForm({
         name: c.name,
         type: c.type,
@@ -143,14 +152,32 @@ export function ConnectionsPage() {
       <h2 className="text-2xl font-bold">Connections</h2>
 
       <form
-        onSubmit={(e) => { e.preventDefault(); save.mutate(); }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (nameInvalid) return;
+          save.mutate();
+        }}
         className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4 border border-border rounded bg-white"
       >
         <div className="sm:col-span-2 text-sm font-medium">
           {editingId ? `Editando conexão ${form.name}` : "Nova conexão"}
         </div>
-        <input className="border border-border rounded px-3 py-2" placeholder="Name"
-               value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        <div>
+          <input
+            className={
+              "w-full border rounded px-3 py-2 " +
+              (nameInvalid ? "border-red-500" : "border-border")
+            }
+            placeholder="Name (a-z, 0-9, _ e -)"
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+          />
+          {nameInvalid && (
+            <div className="text-xs text-red-600 mt-1">
+              Use apenas letras minúsculas, dígitos, sublinhado (_) e hífen (-), até 64 caracteres.
+            </div>
+          )}
+        </div>
         <select className="border border-border rounded px-3 py-2"
                 value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
           {["pg","mysql","mssql","oracle","mongo","firebird","rest"].map((t) => <option key={t}>{t}</option>)}
@@ -160,7 +187,10 @@ export function ConnectionsPage() {
         <textarea className="sm:col-span-2 border border-border rounded px-3 py-2 font-mono text-sm h-24"
                   placeholder="JSON config (encrypted at rest)"
                   value={form.config} onChange={(e) => setForm({ ...form, config: e.target.value })} />
-        <button className="bg-primary text-white rounded py-2" disabled={save.isPending}>
+        <button
+          className="bg-primary text-white rounded py-2 disabled:opacity-50"
+          disabled={save.isPending || nameInvalid}
+        >
           {save.isPending ? "Saving..." : editingId ? "Update" : "Create"}
         </button>
         <button type="button" className="border border-border rounded py-2"

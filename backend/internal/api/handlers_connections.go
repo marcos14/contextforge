@@ -4,12 +4,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/marcos14/contextforge/backend/internal/drivers"
 	"github.com/marcos14/contextforge/backend/internal/store"
 )
+
+// Slug-style: lowercase letters, digits, underscore and hyphen. Bounded length
+// keeps the name usable in URLs, audit logs and @mention syntax in the UI.
+var connectionNameRe = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
+
+func validateConnectionName(name string) error {
+	if !connectionNameRe.MatchString(name) {
+		return fmt.Errorf("name must match %s", connectionNameRe.String())
+	}
+	return nil
+}
 
 // ============== Connections ==============
 
@@ -28,6 +40,10 @@ func (a *API) CreateConnection(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Name == "" || in.Type == "" || len(in.Config) == 0 {
 		writeErr(w, http.StatusBadRequest, "name, type and config are required")
+		return
+	}
+	if err := validateConnectionName(in.Name); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	id := uuid.New()
@@ -184,6 +200,21 @@ func (a *API) UpdateConnection(w http.ResponseWriter, r *http.Request) {
 	if in.Name == "" || in.Type == "" || len(in.Config) == 0 {
 		writeErr(w, http.StatusBadRequest, "name, type and config are required")
 		return
+	}
+	// Grandfathering: pre-existing connections may have names that violate the
+	// current slug rule. Only enforce the rule when the caller is actually
+	// changing the name.
+	var currentName string
+	if err := a.Pool.QueryRow(r.Context(),
+		`SELECT name FROM connections WHERE id=$1`, id).Scan(&currentName); err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if in.Name != currentName {
+		if err := validateConnectionName(in.Name); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	enc, err := a.Cipher.Encrypt(in.Config, []byte("connection:"+id.String()))
 	if err != nil {

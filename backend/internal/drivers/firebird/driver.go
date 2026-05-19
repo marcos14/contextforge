@@ -65,7 +65,7 @@ ORDER  BY r.RDB$RELATION_NAME, f.RDB$FIELD_POSITION`
 		}
 		i, ok := idx[table]
 		if !ok {
-			out = append(out, drivers.Table{Name: table})
+			out = append(out, drivers.Table{Schema: "PUBLIC", Name: table})
 			i = len(out) - 1
 			idx[table] = i
 		}

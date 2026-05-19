@@ -614,7 +614,7 @@ export function ToolsPage() {
 
   const detectMention = (text: string, cursor: number) => {
     const before = text.slice(0, cursor);
-    const m = before.match(/(^|[^\w.])([@#])([\w.]*)$/);
+    const m = before.match(/(^|[^\w.-])([@#])([\w.-]*)$/);
     if (!m) return null;
     const trigger = m[2] as "@" | "#";
     const query = m[3];
@@ -781,7 +781,7 @@ export function ToolsPage() {
     }
     // 3) Column-level emphasis for any @conn.schema.table.col mention in the
     //    current message (depths 1-3 are already covered by pinned schema).
-    const atRe = /(?:^|\s)@([\w.]+)/g;
+    const atRe = /(?:^|\s)@([\w.-]+)/g;
     const seen = new Set<string>();
     let mm: RegExpExecArray | null;
     while ((mm = atRe.exec(text)) !== null) {
