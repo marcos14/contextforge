@@ -38,6 +38,8 @@ extracted from a database. You must produce a single SELECT-only query
 
 Rules:
 - Only SELECT or WITH ... SELECT statements.
+- Produce EXACTLY ONE statement. Do not include a trailing semicolon. Never
+  emit two statements separated by ";".
 - Use placeholders :param_name for any user-supplied input.
 - Do not concatenate untrusted strings.
 - Do not invent tables/columns; use only those provided.
@@ -52,6 +54,31 @@ Respond strictly as JSON with this schema:
  "params": [{"name":"...", "type":"string|number|integer|boolean|array", "items_type":"string|number|integer|boolean (only when type==array)", "description":"...", "required":true|false}],
  "notes": "<optional explanation>"}`
 
+// dialectGuidance returns a per-driver system note appended to the prompt so
+// the LLM produces SQL the driver actually accepts. Returns "" for drivers
+// without special rules.
+func dialectGuidance(kind string) string {
+	switch kind {
+	case "firebird":
+		// Firebird has no schemas. The UI surfaces a synthetic "PUBLIC"
+		// schema in mention navigation, but it must not appear in SQL —
+		// "SELECT ... FROM PUBLIC.CONTAS" raises "Procedure unknown
+		// PUBLIC.CONTAS". Tables are referenced by name only.
+		return "Dialect: Firebird. Firebird has no schemas — reference every table by its NAME only (e.g. \"SELECT ... FROM CONTAS\"), never qualified with a schema. Identifier quoting uses double quotes when needed."
+	}
+	return ""
+}
+
+// formatTableForPrompt renders one table reference for the LLM. For drivers
+// without real schemas we omit the synthetic schema prefix so the model does
+// not paste it into SQL.
+func formatTableForPrompt(t drivers.Table, kind string) string {
+	if kind == "firebird" || t.Schema == "" {
+		return t.Name
+	}
+	return t.Schema + "." + t.Name
+}
+
 // GenerateQuery asks the model to produce a query and params spec.
 func (c *Client) GenerateQuery(ctx context.Context, in GenerateQueryInput) (*GenerateQueryOutput, error) {
 	var sb strings.Builder
@@ -59,11 +86,7 @@ func (c *Client) GenerateQuery(ctx context.Context, in GenerateQueryInput) (*Gen
 	sb.WriteString(in.ConnectionKind)
 	sb.WriteString("\n\nAvailable tables:\n")
 	for _, t := range in.Tables {
-		name := t.Name
-		if t.Schema != "" {
-			name = t.Schema + "." + t.Name
-		}
-		fmt.Fprintf(&sb, "- %s\n", name)
+		fmt.Fprintf(&sb, "- %s\n", formatTableForPrompt(t, in.ConnectionKind))
 		for _, col := range t.Columns {
 			fmt.Fprintf(&sb, "    %s %s%s\n", col.Name, col.Type, nullableTag(col.Nullable))
 		}
@@ -71,10 +94,12 @@ func (c *Client) GenerateQuery(ctx context.Context, in GenerateQueryInput) (*Gen
 	sb.WriteString("\nUser request:\n")
 	sb.WriteString(in.UserPrompt)
 
-	raw, err := c.Chat(ctx, []Message{
-		{Role: "system", Content: genQuerySystem},
-		{Role: "user", Content: sb.String()},
-	}, true)
+	msgs := []Message{{Role: "system", Content: genQuerySystem}}
+	if hint := dialectGuidance(in.ConnectionKind); hint != "" {
+		msgs = append(msgs, Message{Role: "system", Content: hint})
+	}
+	msgs = append(msgs, Message{Role: "user", Content: sb.String()})
+	raw, err := c.Chat(ctx, msgs, true)
 	if err != nil {
 		return nil, err
 	}
@@ -196,9 +221,17 @@ Behaviour:
 - Ask short, targeted follow-up questions when the request is ambiguous.
 - Only use tables/columns provided in the system context. If something is
   missing, ask the user instead of guessing.
+- The "query" field MUST contain EXACTLY ONE statement. Do not include a
+  trailing semicolon. Never emit two statements separated by ";".
 - Prefer explicit column lists over SELECT *.
-- Optional parameters MUST be handled with a NULL-tolerant pattern such as
-  "(:name IS NULL OR column = :name)" so the dry-run with NULL values works.
+- EVERY :param MUST be guarded with a NULL-tolerant pattern such as
+  "(:name IS NULL OR column = :name)" (or, for ranges, ":name IS NULL OR
+  date_col >= :name"). The activation dry-run passes NULL for every :param
+  the user does not supply — without the NULL guard the driver will try to
+  coerce NULL into the column type and the dry-run will fail (e.g. Firebird
+  raises "conversion error from string"). This applies to BOTH required
+  AND optional params: required only means the MCP caller must supply a
+  value at runtime, not that the dry-run will.
 - For parameters that accept multiple values (e.g. lists of ids), declare
   them with type="array" and a matching items_type (string/integer/...).
   Use the dialect's array operator (Postgres: "column = ANY(:name)";
@@ -238,11 +271,7 @@ func (c *Client) ChatTool(ctx context.Context, in ChatToolInput) (*ChatToolOutpu
 		sb.WriteString("(none provided yet — ask the user to run \"Carregar schema\" if you need column details)\n")
 	}
 	for _, t := range in.Tables {
-		name := t.Name
-		if t.Schema != "" {
-			name = t.Schema + "." + t.Name
-		}
-		fmt.Fprintf(&sb, "- %s\n", name)
+		fmt.Fprintf(&sb, "- %s\n", formatTableForPrompt(t, in.ConnectionKind))
 		for _, col := range t.Columns {
 			fmt.Fprintf(&sb, "    %s %s%s\n", col.Name, col.Type, nullableTag(col.Nullable))
 		}
@@ -251,6 +280,9 @@ func (c *Client) ChatTool(ctx context.Context, in ChatToolInput) (*ChatToolOutpu
 	msgs := []Message{
 		{Role: "system", Content: chatToolSystem},
 		{Role: "system", Content: sb.String()},
+	}
+	if hint := dialectGuidance(in.ConnectionKind); hint != "" {
+		msgs = append(msgs, Message{Role: "system", Content: hint})
 	}
 	if in.Current != nil && (in.Current.QueryText != "" || in.Current.Slug != "" || in.Current.Title != "" || in.Current.Description != "" || len(in.Current.ParamsSchema) > 0) {
 		var cb strings.Builder
@@ -413,7 +445,11 @@ func (c *Client) GenerateCode(ctx context.Context, in GenerateCodeInput) (*Gener
 		sb.WriteString("(none configured)\n")
 	}
 	for _, conn := range in.Connections {
-		fmt.Fprintf(&sb, "- %s (%s)\n", conn.Name, conn.Type)
+		fmt.Fprintf(&sb, "- %s (%s)", conn.Name, conn.Type)
+		if conn.Type == "firebird" {
+			sb.WriteString(" — Firebird has no schemas; reference tables by NAME only (e.g. \"SELECT ... FROM CONTAS\"), never as \"PUBLIC.CONTAS\"")
+		}
+		sb.WriteString("\n")
 	}
 	sb.WriteString("\nAvailable tools (use via tools.call(<slug>, params)):\n")
 	if len(in.Tools) == 0 {

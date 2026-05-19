@@ -668,13 +668,14 @@ func buildDryRunParams(in toolReq) map[string]any {
 	}
 
 	types := schemaPropTypes(in.ParamsSchema)
+	isCode := in.kindOrDefault() == store.ToolKindCode
 
 	// For code tools the snippet accesses params by attribute name
 	// (e.g. params.a) instead of SQL placeholders, so the regex-based
 	// detection below would leave them empty. Pre-fill every declared
 	// schema property with a sensible default so the dry-run actually
 	// exercises the code instead of failing on "undefined" inputs.
-	if in.kindOrDefault() == store.ToolKindCode {
+	if isCode {
 		for name, t := range types {
 			if _, ok := out[name]; !ok {
 				out[name] = defaultValueForType(t)
@@ -690,7 +691,18 @@ func buildDryRunParams(in toolReq) map[string]any {
 		if _, ok := out[name]; ok {
 			continue
 		}
-		out[name] = defaultValueForType(types[name])
+		if isCode {
+			out[name] = defaultValueForType(types[name])
+		} else {
+			// SQL tools: pass NULL for any param the user did not supply.
+			// The prompt requires every :param to be guarded with a
+			// NULL-tolerant pattern (e.g. "(:name IS NULL OR col = :name)"),
+			// so the dry-run exercises the query without forcing the driver
+			// to coerce an empty string into a DATE/NUMERIC column — that
+			// coercion is what raises Firebird's SQL error -303 ("conversion
+			// error from string \"\"").
+			out[name] = nil
+		}
 	}
 	if _, ok := out["_token_id"]; !ok {
 		out["_token_id"] = "00000000-0000-0000-0000-000000000000"

@@ -27,31 +27,42 @@ var (
 // analysis (comments stripped, then keyword scan); proper parsers should be
 // preferred per dialect when available.
 //
-// Returns nil when the SQL is safe to execute under a read-only contract.
-func EnforceReadOnly(sql string) error {
+// Returns the sanitized SQL (trailing semicolons and whitespace stripped) when
+// the input is safe to execute under a read-only contract. Callers should pass
+// the returned string to the driver-specific renderer (RenderNamed) so the
+// cleaned form reaches the database — many drivers (Firebird in particular)
+// reject a trailing ";".
+func EnforceReadOnly(sql string) (string, error) {
 	clean := blockComment.ReplaceAllString(sql, " ")
 	clean = lineComment.ReplaceAllString(clean, " ")
 	clean = strings.TrimSpace(clean)
+	// Strip any trailing ";" plus surrounding whitespace. LLMs frequently
+	// emit a closing semicolon by habit; on `?`-dialect drivers (Firebird,
+	// MySQL) that trailing token would otherwise be sent to the DB and
+	// rejected as a syntax error.
+	for strings.HasSuffix(clean, ";") {
+		clean = strings.TrimSpace(strings.TrimSuffix(clean, ";"))
+	}
 	if clean == "" {
-		return fmt.Errorf("empty query")
+		return "", fmt.Errorf("empty query")
 	}
 	if multiStmt.MatchString(clean) {
-		return fmt.Errorf("multiple statements are not allowed")
+		return "", fmt.Errorf("multiple statements are not allowed")
 	}
 	upper := strings.ToUpper(clean)
 	// Word-boundary keyword scan.
 	for _, kw := range destructiveKeywords {
 		re := regexp.MustCompile(`\b` + kw + `\b`)
 		if re.MatchString(upper) {
-			return fmt.Errorf("forbidden keyword %q in query", kw)
+			return "", fmt.Errorf("forbidden keyword %q in query", kw)
 		}
 	}
 	// First token must be SELECT or WITH (CTEs).
 	first := strings.Fields(upper)[0]
 	if first != "SELECT" && first != "WITH" && first != "SHOW" && first != "EXPLAIN" {
-		return fmt.Errorf("only SELECT/WITH/SHOW/EXPLAIN queries are allowed, got %q", first)
+		return "", fmt.Errorf("only SELECT/WITH/SHOW/EXPLAIN queries are allowed, got %q", first)
 	}
-	return nil
+	return clean, nil
 }
 
 // namedParamRe matches :ident placeholders, ignoring ::cast tokens and
@@ -85,20 +96,35 @@ func RenderNamed(query, dialect string, params map[string]any) (string, []any, e
 			return "", nil, fmt.Errorf("missing parameter %q", name)
 		}
 		out.WriteString(query[last : m[2]+1]) // include the lead char
-		pos, exists := seen[name]
-		if !exists {
-			args = append(args, val)
-			idx++
-			pos = idx
-			seen[name] = pos
-		}
 		switch dialect {
 		case "$":
+			// Postgres supports positional reuse ($1 referenced N times),
+			// so a single arg covers every occurrence of :name.
+			pos, exists := seen[name]
+			if !exists {
+				args = append(args, val)
+				idx++
+				pos = idx
+				seen[name] = pos
+			}
 			fmt.Fprintf(&out, "$%d", pos)
-		case "?":
-			out.WriteByte('?')
 		case "@p":
+			// MSSQL @pN also supports reuse.
+			pos, exists := seen[name]
+			if !exists {
+				args = append(args, val)
+				idx++
+				pos = idx
+				seen[name] = pos
+			}
 			fmt.Fprintf(&out, "@p%d", pos)
+		case "?":
+			// MySQL/Firebird use anonymous `?` placeholders, which DO NOT
+			// support reuse — each `?` consumes the next arg in order. So
+			// every occurrence of :name must push its value onto args, even
+			// when the name repeats (e.g. "WHERE x = :id OR y = :id").
+			args = append(args, val)
+			out.WriteByte('?')
 		default:
 			return "", nil, fmt.Errorf("unsupported dialect %q", dialect)
 		}

@@ -93,10 +93,11 @@ ORDER  BY n.nspname, c.relname, a.attnum`
 }
 
 func (d *driver) Execute(ctx context.Context, req drivers.ExecRequest) (*drivers.ExecResult, error) {
-	if err := drivers.EnforceReadOnly(req.Query); err != nil {
+	clean, err := drivers.EnforceReadOnly(req.Query)
+	if err != nil {
 		return nil, err
 	}
-	q, args, err := drivers.RenderNamed(req.Query, "$", req.Params)
+	q, args, err := drivers.RenderNamed(clean, "$", req.Params)
 	if err != nil {
 		return nil, err
 	}

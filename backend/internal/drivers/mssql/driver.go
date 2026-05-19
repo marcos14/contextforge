@@ -68,10 +68,11 @@ ORDER  BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION`
 }
 
 func (d *driver) Execute(ctx context.Context, req drivers.ExecRequest) (*drivers.ExecResult, error) {
-	if err := drivers.EnforceReadOnly(req.Query); err != nil {
+	clean, err := drivers.EnforceReadOnly(req.Query)
+	if err != nil {
 		return nil, err
 	}
-	q, args, err := drivers.RenderNamed(req.Query, "@p", req.Params)
+	q, args, err := drivers.RenderNamed(clean, "@p", req.Params)
 	if err != nil {
 		return nil, err
 	}
