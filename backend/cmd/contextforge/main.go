@@ -101,7 +101,7 @@ func main() {
 
 	// Wire code-tool runtime AFTER exec is built (mutual deps: runtime needs
 	// the executor for tools.call/db()).
-	codeRT := codetool.New(reg, exec, exec, logger)
+	codeRT := codetool.New(reg, exec, exec, logger, cfg.DefaultRowLimit)
 	exec.SetCodeRuntime(func(ctx context.Context, inv executor.CodeInvocation) (*drivers.ExecResult, error) {
 		return codeRT.Run(ctx, codetool.Invocation{
 			Slug:      inv.Slug,
@@ -171,6 +171,7 @@ func main() {
 	apiSrv := &api.API{
 		Pool: pool, Signer: signer, Cipher: cipher,
 		Registry: reg, Executor: exec, CodeRuntime: codeRT, LLM: llmClient, Cache: cch,
+		DefaultRowLimit: cfg.DefaultRowLimit,
 	}
 	r.Route("/api", apiSrv.Mount)
 

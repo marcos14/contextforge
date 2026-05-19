@@ -22,14 +22,15 @@ import (
 
 // API bundles the dependencies handlers need.
 type API struct {
-	Pool        *pgxpool.Pool
-	Signer      *auth.Signer
-	Cipher      *crypto.Cipher
-	Registry    *registry.Registry
-	Executor    *executor.Executor
-	CodeRuntime *codetool.Runtime
-	LLM         *llm.Client
-	Cache       *cache.Cache
+	Pool            *pgxpool.Pool
+	Signer          *auth.Signer
+	Cipher          *crypto.Cipher
+	Registry        *registry.Registry
+	Executor        *executor.Executor
+	CodeRuntime     *codetool.Runtime
+	LLM             *llm.Client
+	Cache           *cache.Cache
+	DefaultRowLimit int
 }
 
 type ctxKey int

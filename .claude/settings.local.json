@@ -26,7 +26,9 @@
       "Bash(node node_modules/.bin/tsc --noEmit -p .)",
       "Bash(echo \"Exit: $?\")",
       "PowerShell(Get-Command node, npm -ErrorAction SilentlyContinue)",
-      "PowerShell($env:PATH -split \";\" | Where-Object { $_ -match \"node|nvm|volta\" })"
+      "PowerShell($env:PATH -split \";\" | Where-Object { $_ -match \"node|nvm|volta\" })",
+      "Bash(go build *)",
+      "PowerShell(docker run --rm -v \"C:\\\\Projetos\\\\MA\\\\contextforge\\\\backend:/app\" -w /app golang:latest go build ./... 2>&1)"
     ]
   }
 }

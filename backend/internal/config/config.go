@@ -34,6 +34,8 @@ type Config struct {
 	BootstrapAdminEmail    string
 	BootstrapAdminPassword string
 
+	DefaultRowLimit int
+
 	OTELEndpoint   string
 	OTELService    string
 	MetricsEnabled bool
@@ -83,6 +85,7 @@ func Load() (*Config, error) {
 		OpenRouterTimeout:      time.Duration(envInt("OPENROUTER_TIMEOUT_SECONDS", 60)) * time.Second,
 		BootstrapAdminEmail:    envStr("BOOTSTRAP_ADMIN_EMAIL", "admin@example.com"),
 		BootstrapAdminPassword: os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
+		DefaultRowLimit:        envInt("TOOL_DEFAULT_ROW_LIMIT", 1000),
 		OTELEndpoint:           os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 		OTELService:            envStr("OTEL_SERVICE_NAME", "contextforge"),
 		MetricsEnabled:         envBool("METRICS_ENABLED", true),

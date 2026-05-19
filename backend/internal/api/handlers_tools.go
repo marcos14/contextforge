@@ -225,7 +225,7 @@ func (a *API) CreateTool(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if in.RowLimit <= 0 {
-		in.RowLimit = 1000
+		in.RowLimit = a.DefaultRowLimit
 	}
 	if in.TimeoutMS <= 0 {
 		in.TimeoutMS = 15000
@@ -421,8 +421,8 @@ FROM tools WHERE id=$1`, id).
 		TimeoutMS:    t.TimeoutMS,
 		TestParams:   body.Params,
 	}
-	if in.RowLimit <= 0 || in.RowLimit > 1000 {
-		in.RowLimit = 1000
+	if in.RowLimit <= 0 || in.RowLimit > a.DefaultRowLimit {
+		in.RowLimit = a.DefaultRowLimit
 	}
 	res, err := a.dryRunTool(r, in)
 	if err != nil {
@@ -466,7 +466,7 @@ func (a *API) UpdateTool(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if in.RowLimit <= 0 {
-		in.RowLimit = 1000
+		in.RowLimit = a.DefaultRowLimit
 	}
 	if in.TimeoutMS <= 0 {
 		in.TimeoutMS = 15000

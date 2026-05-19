@@ -52,19 +52,23 @@ type ToolInvoker interface {
 
 // Runtime executes JS code-tools.
 type Runtime struct {
-	registry *registry.Registry
-	opener   DriverOpener
-	invoker  ToolInvoker
-	log      *slog.Logger
+	registry        *registry.Registry
+	opener          DriverOpener
+	invoker         ToolInvoker
+	log             *slog.Logger
+	defaultRowLimit int
 }
 
 // New builds a Runtime. opener/invoker may be nil for tests that don't
 // exercise db()/tools.call.
-func New(reg *registry.Registry, opener DriverOpener, invoker ToolInvoker, log *slog.Logger) *Runtime {
+func New(reg *registry.Registry, opener DriverOpener, invoker ToolInvoker, log *slog.Logger, defaultRowLimit int) *Runtime {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Runtime{registry: reg, opener: opener, invoker: invoker, log: log}
+	if defaultRowLimit <= 0 {
+		defaultRowLimit = 1000
+	}
+	return &Runtime{registry: reg, opener: opener, invoker: invoker, log: log, defaultRowLimit: defaultRowLimit}
 }
 
 // connectionIDByName resolves a connection name through the registry
@@ -126,7 +130,7 @@ func (rt *Runtime) Run(ctx context.Context, inv Invocation) (*drivers.ExecResult
 		inv.Timeout = 15 * time.Second
 	}
 	if inv.RowLimit <= 0 {
-		inv.RowLimit = 1000
+		inv.RowLimit = rt.defaultRowLimit
 	}
 
 	vm := goja.New()
