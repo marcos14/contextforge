@@ -28,7 +28,9 @@
       "PowerShell(Get-Command node, npm -ErrorAction SilentlyContinue)",
       "PowerShell($env:PATH -split \";\" | Where-Object { $_ -match \"node|nvm|volta\" })",
       "Bash(go build *)",
-      "PowerShell(docker run --rm -v \"C:\\\\Projetos\\\\MA\\\\contextforge\\\\backend:/app\" -w /app golang:latest go build ./... 2>&1)"
+      "PowerShell(docker run --rm -v \"C:\\\\Projetos\\\\MA\\\\contextforge\\\\backend:/app\" -w /app golang:latest go build ./... 2>&1)",
+      "PowerShell(& \"C:\\\\Users\\\\Junsoft\\\\Documents\\\\projetos\\\\contextforge\\\\frontend\\\\node_modules\\\\.bin\\\\tsc.cmd\" --noEmit -p \"C:\\\\Users\\\\Junsoft\\\\Documents\\\\projetos\\\\contextforge\\\\frontend\")",
+      "PowerShell(Test-Path \"C:\\\\Users\\\\Junsoft\\\\Documents\\\\projetos\\\\contextforge\\\\frontend\\\\node_modules\"; \\(Get-Command npx -ErrorAction SilentlyContinue\\).Source)"
     ]
   }
 }

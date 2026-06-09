@@ -89,7 +89,7 @@ func main() {
 		logger.Error("cipher", "err", err)
 		os.Exit(1)
 	}
-	signer := auth.NewSigner(cfg.JWTSecret)
+	signer := auth.NewSigner(cfg.JWTSecret, cfg.JWTAccessTTL, cfg.JWTRefreshTTL)
 	rl := ratelimit.New(rdb)
 	cch := cache.New(rdb)
 

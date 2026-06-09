@@ -23,6 +23,9 @@ type Config struct {
 	MasterKey []byte // 32 raw bytes
 	JWTSecret []byte
 
+	JWTAccessTTL  time.Duration
+	JWTRefreshTTL time.Duration
+
 	RegistryRefresh   time.Duration
 	RateLimitIPPerMin int
 
@@ -77,6 +80,8 @@ func Load() (*Config, error) {
 		LogLevel:               envStr("LOG_LEVEL", "info"),
 		DatabaseURL:            os.Getenv("DATABASE_URL"),
 		RedisURL:               envStr("REDIS_URL", "redis://localhost:6379/0"),
+		JWTAccessTTL:           time.Duration(envInt("JWT_ACCESS_TTL_MINUTES", 60)) * time.Minute,
+		JWTRefreshTTL:          time.Duration(envInt("JWT_REFRESH_TTL_DAYS", 30)) * 24 * time.Hour,
 		RegistryRefresh:        time.Duration(envInt("REGISTRY_REFRESH_SECONDS", 5)) * time.Second,
 		RateLimitIPPerMin:      envInt("RATE_LIMIT_IP_PER_MIN", 600),
 		OpenRouterAPIKey:       os.Getenv("OPENROUTER_API_KEY"),

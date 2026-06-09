@@ -20,8 +20,8 @@ import (
 // ============== Admin UI (bcrypt + JWT) ==============
 
 const (
-	accessTTL  = 15 * time.Minute
-	refreshTTL = 30 * 24 * time.Hour
+	defaultAccessTTL  = 15 * time.Minute
+	defaultRefreshTTL = 30 * 24 * time.Hour
 )
 
 // HashPassword hashes a plain password with bcrypt cost 12.
@@ -48,10 +48,22 @@ type Claims struct {
 
 // Signer issues and validates JWTs.
 type Signer struct {
-	secret []byte
+	secret     []byte
+	accessTTL  time.Duration
+	refreshTTL time.Duration
 }
 
-func NewSigner(secret []byte) *Signer { return &Signer{secret: secret} }
+// NewSigner builds a Signer. A non-positive accessTTL/refreshTTL falls back to
+// the package defaults (15 min / 30 days).
+func NewSigner(secret []byte, accessTTL, refreshTTL time.Duration) *Signer {
+	if accessTTL <= 0 {
+		accessTTL = defaultAccessTTL
+	}
+	if refreshTTL <= 0 {
+		refreshTTL = defaultRefreshTTL
+	}
+	return &Signer{secret: secret, accessTTL: accessTTL, refreshTTL: refreshTTL}
+}
 
 func (s *Signer) issue(userID uuid.UUID, role, typ string, ttl time.Duration) (string, error) {
 	c := Claims{
@@ -70,12 +82,12 @@ func (s *Signer) issue(userID uuid.UUID, role, typ string, ttl time.Duration) (s
 
 // IssueAccess returns a short-lived access token.
 func (s *Signer) IssueAccess(userID uuid.UUID, role string) (string, error) {
-	return s.issue(userID, role, "access", accessTTL)
+	return s.issue(userID, role, "access", s.accessTTL)
 }
 
 // IssueRefresh returns a longer-lived refresh token.
 func (s *Signer) IssueRefresh(userID uuid.UUID, role string) (string, error) {
-	return s.issue(userID, role, "refresh", refreshTTL)
+	return s.issue(userID, role, "refresh", s.refreshTTL)
 }
 
 // Verify parses and validates a JWT, returning the claims.

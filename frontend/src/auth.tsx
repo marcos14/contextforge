@@ -12,14 +12,61 @@ export function getAuth(): Auth | null {
 }
 export function clearAuth() { localStorage.removeItem(KEY); }
 
-export async function api<T = any>(path: string, init: RequestInit = {}): Promise<T> {
+// Single in-flight refresh promise so concurrent 401s trigger only one
+// /api/auth/refresh call (avoids a refresh stampede).
+let refreshPromise: Promise<string | null> | null = null;
+
+// refreshAccessToken trades the stored refresh_token for a fresh access token,
+// updates localStorage in place, and returns the new token (or null on failure).
+function refreshAccessToken(): Promise<string | null> {
   const a = getAuth();
-  const headers = new Headers(init.headers);
-  if (a) headers.set("Authorization", `Bearer ${a.access_token}`);
-  const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
-  if (init.body && !headers.has("Content-Type") && !isFormData) headers.set("Content-Type", "application/json");
-  const r = await fetch(path, { ...init, headers });
-  if (r.status === 401) { clearAuth(); window.location.href = "/login"; throw new Error("unauthorized"); }
+  if (!a?.refresh_token) return Promise.resolve(null);
+  if (!refreshPromise) {
+    refreshPromise = fetch("/api/auth/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: a.refresh_token }),
+    })
+      .then(async (r) => {
+        if (!r.ok) return null;
+        const data = await r.json().catch(() => null);
+        const cur = getAuth();
+        if (cur && data?.access_token) {
+          setAuth({ ...cur, access_token: data.access_token });
+          return data.access_token as string;
+        }
+        return null;
+      })
+      .catch(() => null)
+      .finally(() => { refreshPromise = null; });
+  }
+  return refreshPromise;
+}
+
+// authedFetch performs a fetch with the Authorization header injected. On a 401
+// it attempts a single token refresh and retries the request once; if it still
+// fails, the session is cleared and the user is redirected to /login.
+async function authedFetch(path: string, init: RequestInit): Promise<Response> {
+  // Headers are rebuilt per attempt so the retry picks up the refreshed token.
+  const buildHeaders = () => {
+    const a = getAuth();
+    const headers = new Headers(init.headers);
+    if (a) headers.set("Authorization", `Bearer ${a.access_token}`);
+    const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
+    if (init.body && !headers.has("Content-Type") && !isFormData) headers.set("Content-Type", "application/json");
+    return headers;
+  };
+  let r = await fetch(path, { ...init, headers: buildHeaders() });
+  if (r.status === 401) {
+    const token = await refreshAccessToken();
+    if (token) r = await fetch(path, { ...init, headers: buildHeaders() });
+    if (r.status === 401) { clearAuth(); window.location.href = "/login"; throw new Error("unauthorized"); }
+  }
+  return r;
+}
+
+export async function api<T = any>(path: string, init: RequestInit = {}): Promise<T> {
+  const r = await authedFetch(path, init);
   if (!r.ok) {
     const err = await r.json().catch(() => ({ error: r.statusText }));
     throw new Error(err.error || r.statusText);
@@ -38,13 +85,7 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
 // apiBlob fetches a binary response (e.g. file download) and returns the raw
 // Blob. Auth header is injected like in api(). Throws on non-OK.
 export async function apiBlob(path: string, init: RequestInit = {}): Promise<Blob> {
-  const a = getAuth();
-  const headers = new Headers(init.headers);
-  if (a) headers.set("Authorization", `Bearer ${a.access_token}`);
-  const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
-  if (init.body && !headers.has("Content-Type") && !isFormData) headers.set("Content-Type", "application/json");
-  const r = await fetch(path, { ...init, headers });
-  if (r.status === 401) { clearAuth(); window.location.href = "/login"; throw new Error("unauthorized"); }
+  const r = await authedFetch(path, init);
   if (!r.ok) {
     const err = await r.json().catch(() => ({ error: r.statusText }));
     throw new Error(err.error || r.statusText);
