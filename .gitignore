@@ -26,3 +26,7 @@ frontend/.vite/
 
 # Build artifacts
 deploy/data/
+
+# >>> praxis (orquestrador de fases) — nao edite entre os marcadores >>>
+/automacao/
+# <<< praxis <<<
