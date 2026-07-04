@@ -22,7 +22,7 @@
       "dir": "frontend",
       "somente_se_mudou": true,
       "comandos": [
-        "./node_modules/.bin/tsc --noEmit -p .",
+        "npx tsc --noEmit -p .",
         "npm run build"
       ]
     }
