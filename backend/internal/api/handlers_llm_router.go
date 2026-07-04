@@ -245,6 +245,10 @@ func (a *API) Mount(r chi.Router) {
 		r.Post("/query-studio/chat", a.QueryStudioChat)
 		r.Post("/query-studio/explain", a.QueryStudioExplain)
 		r.Post("/query-studio/preview", a.QueryStudioPreview)
+		r.Get("/query-studio/sessions", a.ListQuerySessions)
+		r.Post("/query-studio/sessions", a.SaveQuerySession)
+		r.Get("/query-studio/sessions/{id}", a.GetQuerySession)
+		r.Delete("/query-studio/sessions/{id}", a.DeleteQuerySession)
 
 		r.Post("/backup/export", a.BackupExport)
 		r.Post("/backup/preview", a.BackupPreview)

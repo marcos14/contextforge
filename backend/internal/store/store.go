@@ -21,17 +21,7 @@ func Migrate(ctx context.Context, connURL string) error {
 	if err != nil {
 		return fmt.Errorf("migrations source: %w", err)
 	}
-	// The pgx/v5 migrate driver registers under the "pgx5" scheme. Accept
-	// the standard "postgres://" or "postgresql://" URLs by rewriting the
-	// scheme transparently.
-	migrateURL := connURL
-	if s := strings.SplitN(connURL, "://", 2); len(s) == 2 {
-		switch s[0] {
-		case "postgres", "postgresql":
-			migrateURL = "pgx5://" + s[1]
-		}
-	}
-	m, err := migrate.NewWithSourceInstance("iofs", src, migrateURL)
+	m, err := migrate.NewWithSourceInstance("iofs", src, toMigrateURL(connURL))
 	if err != nil {
 		return fmt.Errorf("migrate init: %w", err)
 	}
@@ -41,6 +31,19 @@ func Migrate(ctx context.Context, connURL string) error {
 		return fmt.Errorf("migrate up: %w", err)
 	}
 	return nil
+}
+
+// toMigrateURL rewrites a standard "postgres://"/"postgresql://" URL to the
+// "pgx5://" scheme expected by the golang-migrate pgx/v5 driver, leaving any
+// other scheme untouched.
+func toMigrateURL(connURL string) string {
+	if s := strings.SplitN(connURL, "://", 2); len(s) == 2 {
+		switch s[0] {
+		case "postgres", "postgresql":
+			return "pgx5://" + s[1]
+		}
+	}
+	return connURL
 }
 
 // Connect opens a pgx connection pool.

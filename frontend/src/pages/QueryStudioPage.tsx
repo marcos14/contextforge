@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../auth";
 import { Badge } from "../components/Badge";
 import { EmptyState } from "../components/EmptyState";
+import { Pagination } from "../components/Pagination";
 import { CodeEditor, type SqlSchema } from "../components/CodeEditor";
 
 // ============================================================================
@@ -54,6 +55,27 @@ type PreviewResp = {
   count: number;
 };
 
+// Saved session history (Fase 2b). The list endpoint returns a light shape; the
+// detail endpoint additionally carries chat_log and last_explain.
+type SessionListItem = {
+  id: string;
+  connection_id: string;
+  title: string;
+  query_text: string;
+  created_at: string;
+  updated_at: string;
+};
+type SessionDetail = SessionListItem & {
+  chat_log: ChatMsg[] | null;
+  last_explain: ExplainResp | null;
+};
+type SessionPage = {
+  items: SessionListItem[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
 // Dialects for which the backend implements the Explainer capability. Others
 // return 422 (ErrUnsupported) and the buttons are disabled.
 const EXPLAIN_KINDS = new Set(["pg", "postgres", "postgresql"]);
@@ -79,6 +101,14 @@ export function QueryStudioPage() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [copied, setCopied] = useState(false);
   const [rightTab, setRightTab] = useState<"plan" | "preview">("plan");
+
+  // ---- Session history (Fase 2b) ----
+  const qc = useQueryClient();
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [histPage, setHistPage] = useState(1);
+  const [histPageSize, setHistPageSize] = useState(10);
+  const [histSearch, setHistSearch] = useState("");
 
   const chatEnd = useRef<HTMLDivElement | null>(null);
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -219,6 +249,94 @@ export function QueryStudioPage() {
     },
   });
 
+  // ---- Session history queries/mutations ----
+  const sessions = useQuery({
+    queryKey: ["query-sessions", histPage, histPageSize, histSearch],
+    queryFn: () =>
+      api<SessionPage>(
+        `/api/query-studio/sessions?page=${histPage}&page_size=${histPageSize}` +
+          (histSearch ? `&q=${encodeURIComponent(histSearch)}` : ""),
+      ),
+    enabled: showHistory,
+  });
+
+  const saveSession = useMutation({
+    mutationFn: async (title: string): Promise<SessionDetail> => {
+      return api<SessionDetail>("/api/query-studio/sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          id: currentSessionId || undefined,
+          connection_id: connId,
+          title,
+          query_text: query,
+          chat_log: chat,
+          last_explain: explainResult || undefined,
+        }),
+      });
+    },
+    onSuccess: (res) => {
+      setCurrentSessionId(res.id);
+      qc.invalidateQueries({ queryKey: ["query-sessions"] });
+    },
+  });
+
+  const deleteSession = useMutation({
+    mutationFn: (id: string) =>
+      api<void>(`/api/query-studio/sessions/${id}`, { method: "DELETE" }),
+    onSuccess: (_res, id) => {
+      if (id === currentSessionId) setCurrentSessionId(null);
+      qc.invalidateQueries({ queryKey: ["query-sessions"] });
+    },
+  });
+
+  const loadSession = useMutation({
+    mutationFn: (id: string) => api<SessionDetail>(`/api/query-studio/sessions/${id}`),
+    onSuccess: (s) => {
+      setConnId(s.connection_id);
+      setQuery(s.query_text || "");
+      const log = Array.isArray(s.chat_log) ? s.chat_log : [];
+      setChat(log);
+      setExplainResult(s.last_explain || null);
+      setPendingExplain("");
+      setPreviewResult(null);
+      // Restore the SQL/perf panels from the last assistant proposal, if any.
+      const lastProposal = [...log].reverse().find((m) => m.role === "assistant" && m.query);
+      if (lastProposal) {
+        applyProposal({
+          reply: lastProposal.content,
+          query: lastProposal.query,
+          explanation: lastProposal.explanation,
+          suggested_indexes: lastProposal.suggested_indexes,
+          performance_notes: lastProposal.performance_notes,
+          assumptions: lastProposal.assumptions,
+        });
+        if (s.query_text) setQuery(s.query_text);
+      } else {
+        setExplanation("");
+        setSuggestedIndexes([]);
+        setPerformanceNotes([]);
+        setAssumptions([]);
+      }
+      setCurrentSessionId(s.id);
+      setShowHistory(false);
+    },
+  });
+
+  const onSaveSession = () => {
+    if (!connId) {
+      window.alert("Selecione uma conexão antes de salvar a sessão.");
+      return;
+    }
+    const title = window.prompt(
+      "Título da sessão:",
+      query.slice(0, 60) || "Sessão de consulta",
+    );
+    if (title == null) return;
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    saveSession.mutate(trimmed);
+  };
+
   const runExplain = (analyze: boolean) => {
     if (!query.trim()) return;
     if (!connId) return;
@@ -274,18 +392,37 @@ export function QueryStudioPage() {
             para usar em qualquer sistema.
           </p>
         </div>
-        <select
-          className="border border-border rounded px-3 py-2 min-w-[220px]"
-          value={connId}
-          onChange={(e) => setConnId(e.target.value)}
-        >
-          <option value="">— selecione a conexão —</option>
-          {conns.data?.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name} ({c.type})
-            </option>
-          ))}
-        </select>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            className="px-3 py-2 border border-border rounded text-sm hover:bg-muted disabled:opacity-50"
+            onClick={onSaveSession}
+            disabled={!connId || saveSession.isPending}
+            title="Salvar a sessão atual (query + chat + último plano)"
+          >
+            {saveSession.isPending ? "Salvando..." : currentSessionId ? "Salvar" : "Salvar sessão"}
+          </button>
+          <button
+            type="button"
+            className="px-3 py-2 border border-border rounded text-sm hover:bg-muted"
+            onClick={() => setShowHistory(true)}
+            title="Sessões salvas"
+          >
+            Histórico
+          </button>
+          <select
+            className="border border-border rounded px-3 py-2 min-w-[220px]"
+            value={connId}
+            onChange={(e) => setConnId(e.target.value)}
+          >
+            <option value="">— selecione a conexão —</option>
+            {conns.data?.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name} ({c.type})
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
@@ -707,6 +844,165 @@ export function QueryStudioPage() {
             )}
           </div>
         </div>
+      </div>
+
+      {showHistory && (
+        <SessionHistory
+          data={sessions.data}
+          isLoading={sessions.isLoading}
+          error={sessions.error as Error | null}
+          search={histSearch}
+          onSearch={(v) => {
+            setHistSearch(v);
+            setHistPage(1);
+          }}
+          page={histPage}
+          pageSize={histPageSize}
+          onPageChange={setHistPage}
+          onPageSizeChange={(n) => {
+            setHistPageSize(n);
+            setHistPage(1);
+          }}
+          conns={conns.data || []}
+          currentSessionId={currentSessionId}
+          loadingId={loadSession.isPending ? (loadSession.variables as string) : null}
+          onLoad={(id) => loadSession.mutate(id)}
+          onDelete={(id) => {
+            if (window.confirm("Excluir esta sessão salva?")) deleteSession.mutate(id);
+          }}
+          onClose={() => setShowHistory(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// SessionHistory is the saved-session drawer (Fase 2b): a searchable, paginated
+// list of the current user's sessions with load/delete actions. Pagination is
+// server-side; the Pagination component's derived props are computed from total.
+function SessionHistory({
+  data,
+  isLoading,
+  error,
+  search,
+  onSearch,
+  page,
+  pageSize,
+  onPageChange,
+  onPageSizeChange,
+  conns,
+  currentSessionId,
+  loadingId,
+  onLoad,
+  onDelete,
+  onClose,
+}: {
+  data?: SessionPage;
+  isLoading: boolean;
+  error: Error | null;
+  search: string;
+  onSearch: (v: string) => void;
+  page: number;
+  pageSize: number;
+  onPageChange: (p: number) => void;
+  onPageSizeChange: (n: number) => void;
+  conns: Conn[];
+  currentSessionId: string | null;
+  loadingId: string | null;
+  onLoad: (id: string) => void;
+  onDelete: (id: string) => void;
+  onClose: () => void;
+}) {
+  const items = data?.items || [];
+  const total = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const start = (page - 1) * pageSize;
+  const end = start + items.length;
+  const connName = (id: string) => conns.find((c) => c.id === id)?.name || id.slice(0, 8);
+
+  return (
+    <div
+      className="fixed inset-0 z-40 bg-black/30 flex items-start justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded shadow-lg border border-border w-full max-w-2xl mt-10 flex flex-col max-h-[80vh]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <div className="font-semibold">Histórico de sessões</div>
+          <button
+            type="button"
+            className="text-sm px-2 py-1 border border-border rounded hover:bg-muted"
+            onClick={onClose}
+          >
+            Fechar
+          </button>
+        </div>
+        <div className="px-4 py-2 border-b border-border">
+          <input
+            className="w-full border border-border rounded px-2 py-1.5 text-sm"
+            placeholder="Buscar por título..."
+            value={search}
+            onChange={(e) => onSearch(e.target.value)}
+          />
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {isLoading ? (
+            <div className="p-4 text-sm text-muted-foreground">Carregando...</div>
+          ) : error ? (
+            <div className="m-4 bg-red-50 border border-red-200 text-red-700 rounded p-2 text-sm">
+              {error.message}
+            </div>
+          ) : items.length === 0 ? (
+            <EmptyState
+              title="Nenhuma sessão salva"
+              description="Salve a sessão atual para reabri-la depois."
+            />
+          ) : (
+            <ul className="divide-y divide-border">
+              {items.map((s) => (
+                <li key={s.id} className="flex items-center gap-3 px-4 py-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium truncate">{s.title}</span>
+                      {s.id === currentSessionId && <Badge variant="info">atual</Badge>}
+                    </div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      {connName(s.connection_id)} ·{" "}
+                      {new Date(s.updated_at).toLocaleString("pt-BR")}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="text-xs px-2 py-1 bg-primary text-white rounded hover:opacity-90 disabled:opacity-50"
+                    onClick={() => onLoad(s.id)}
+                    disabled={loadingId === s.id}
+                  >
+                    {loadingId === s.id ? "..." : "Carregar"}
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs px-2 py-1 border border-red-300 text-red-700 rounded hover:bg-red-50"
+                    onClick={() => onDelete(s.id)}
+                  >
+                    Excluir
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <Pagination
+          page={page}
+          totalPages={totalPages}
+          total={total}
+          start={start}
+          end={end}
+          pageSize={pageSize}
+          onPageChange={onPageChange}
+          onPageSizeChange={onPageSizeChange}
+        />
       </div>
     </div>
   );

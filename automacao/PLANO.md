@@ -457,12 +457,12 @@ Gate extra: `integration-postgres`
 **Meta:** salvar/listar sessões de query por usuário (título + query + chat +
 último plano), com paginação e UI de histórico.
 
-- [ ] Migration `store/migrations/0005_query_sessions.{up,down}.sql` (incluir `down.sql` e testar rollback).
-- [ ] Model `QuerySession` em `internal/store/models.go`; usar `nullableJSON` nas colunas JSONB.
-- [ ] Endpoints `GET/POST /sessions`, `GET/DELETE /sessions/{id}` (paginação `page/page_size/q`).
-- [ ] UI de histórico com `Pagination`; carregar sessão salva na página.
-- [ ] Documentar decisão: sessões **fora do escopo do backup** (como tokens/usuários).
-- [ ] Testes de handler das sessões.
+- [x] Migration `store/migrations/0005_query_sessions.{up,down}.sql` (incluir `down.sql` e testar rollback).
+- [x] Model `QuerySession` em `internal/store/models.go`; usar `nullableJSON` nas colunas JSONB.
+- [x] Endpoints `GET/POST /sessions`, `GET/DELETE /sessions/{id}` (paginação `page/page_size/q`).
+- [x] UI de histórico com `Pagination`; carregar sessão salva na página.
+- [x] Documentar decisão: sessões **fora do escopo do backup** (como tokens/usuários).
+- [x] Testes de handler das sessões.
 
 Depende de: Fase 1c, Fase 1d
 **Testes:** `go build ./...`, `go test ./internal/api/...`, `./node_modules/.bin/tsc --noEmit -p .`, `npm run build`. Rollback/migração validados via gate extra `integration-postgres`.
@@ -1058,5 +1058,95 @@ Formato sugerido por entrada:
   `go test ./...` OK (drivers: +7 rich; llm: +3 context; api inalterado passa);
   `go test -tags=integration ./...` OK (pg rich/explain auto-pulam sem
   `QUERY_STUDIO_TEST_PG_DSN`). Frontend não tocado.
+- **Commit:** (a cargo do orquestrador)
+
+### Fase 2b — Persistência de sessões (migration + endpoints + UI histórico) (2026-07-04)
+- **Feito:**
+  - **Migration `0005_query_sessions.{up,down}.sql`** (`internal/store/migrations`):
+    tabela `query_sessions` (id, connection_id FK→connections ON DELETE CASCADE,
+    title, query_text, chat_log JSONB DEFAULT '[]', last_explain JSONB nullable,
+    created_by FK→users ON DELETE SET NULL, created_at/updated_at). Índices
+    `idx_query_sessions_created_by(created_by, updated_at DESC)` e
+    `idx_query_sessions_conn(connection_id)`. `down.sql` = `DROP TABLE IF EXISTS`.
+  - **Model** `store.QuerySession` em `internal/store/models.go` (ChatLog/
+    LastExplain como `json.RawMessage`; LastExplain com `omitempty`).
+  - **Handlers** em novo `internal/api/handlers_query_sessions.go`:
+    `ListQuerySessions` (GET, dual-mode legado/paginado com `page/page_size/q`,
+    **escopado ao usuário** via `created_by = currentUser`, lista leve sem
+    chat_log/last_explain, `ORDER BY updated_at DESC`), `SaveQuerySession`
+    (POST — **cria OU atualiza** quando o body traz `id`; valida `title` e
+    `connection_id` **antes** de tocar o DB; usa `nullableJSON(last_explain)` e
+    default `'[]'` p/ chat_log; update escopado ao dono), `GetQuerySession`
+    (GET `/{id}`, full row escopado ao dono → 404 se não for do usuário),
+    `DeleteQuerySession` (DELETE `/{id}`, escopado, 204/404). Rotas registradas
+    em `handlers_llm_router.go::Mount` sob `RequireAuth("admin","editor")`.
+  - **Refactor** `internal/store/store.go`: extraí `toMigrateURL(connURL)`
+    (rewrite `postgres://`→`pgx5://`) de `Migrate`, reusado pelo teste de rollback.
+  - **Frontend** `QueryStudioPage.tsx`: botões **Salvar sessão** (usa
+    `window.prompt` p/ título; salva connection_id + query + chat_log + last_explain;
+    faz upsert com `currentSessionId`) e **Histórico** (overlay com busca,
+    lista paginada server-side usando o componente `Pagination`, ações
+    **Carregar**/**Excluir**). `loadSession` restaura connId, query, chat,
+    explainResult e **re-aplica a última proposta do assistente** do chat_log
+    para repovoar Explicação/Índices/Notas.
+  - **Testes:** `handlers_query_sessions_test.go` (unit: title/connection_id
+    obrigatórios → 400; id inválido em GET/DELETE → 400 — rodam com `&API{}`);
+    `handlers_query_sessions_integration_test.go` (build tag `integration`,
+    auto-pula sem DSN: CRUD completo create→list paged→get→update→delete→404,
+    provisiona user+connection reais); `store/migrate_integration_test.go`
+    (build tag `integration`, auto-pula: valida **rollback** de 0005 via
+    `m.Steps(-1)`/`Steps(1)` conferindo `to_regclass('query_sessions')`).
+- **Decisões / desvios:**
+  - **POST faz upsert (create OU update)** em vez de adicionar rota `PUT`. O
+    plano lista só GET/POST/DELETE; para a UI ter "salvar" e "atualizar" sem
+    rota nova, `SaveQuerySession` atualiza quando o body traz `id` (escopado ao
+    dono) e cria caso contrário. Retorna **201** no create e **200** no update.
+  - **Tudo escopado ao usuário** (`created_by = currentUser`) em list/get/delete/
+    update. "Sessões do usuário" (§4/§9) → um editor não vê/edita/apaga sessão de
+    outro. A fronteira de role continua admin+editor (backend). **Para fases
+    futuras:** se quiser sessões compartilhadas por org, relaxar esse filtro.
+  - **Sessões FORA do escopo do backup** (decisão documentada, §9): não toquei em
+    `internal/backup/backup.go`. Ficam como tokens/usuários — não exportadas nem
+    restauradas. Não são versionadas (sem tabela `*_versions`).
+  - **Lista leve:** `ListQuerySessions` devolve só id/connection_id/title/
+    query_text/created_at/updated_at (sem chat_log/last_explain) p/ manter o
+    payload do histórico enxuto; o detalhe (`GET /{id}`) traz o registro completo.
+  - **Paginação server-side na UI:** o componente `Pagination` recebe props
+    derivadas (`totalPages`/`start`/`end`) computadas do `total` retornado pela
+    API — **não** usei `usePagination` (que faz slice client-side), pois a página
+    já vem paginada do backend.
+  - **`last_explain`/`chat_log` persistem só metadados** (plano de execução e
+    transcript) — **nenhuma linha de preview** é salva (§8.7). O preview continua
+    apenas no cliente.
+- **Descobertas / para as próximas fases:**
+  - **Nomes reais:** tabela `query_sessions`; rotas
+    `GET/POST /api/query-studio/sessions` e `GET/DELETE /api/query-studio/sessions/{id}`.
+    Contrato POST (upsert): `{id?, connection_id, title, query_text?, chat_log?,
+    last_explain?}`. Resposta = `store.QuerySession`
+    (`{id, connection_id, title, query_text, chat_log, last_explain?, created_by?,
+    created_at, updated_at}`). Lista paginada = `{items, total, page, page_size}`.
+  - **Sem mock de `*pgxpool.Pool`** (como notado na Fase 1c): os handlers que
+    tocam DB são cobertos pelo teste `integration` (auto-pula sem
+    `QUERY_STUDIO_TEST_PG_DSN`); os unit tests cobrem só validação pré-DB. Se uma
+    fase futura precisar testar caminhos de DB sem Postgres, terá que introduzir
+    uma interface sobre o Pool (não feito aqui).
+  - **Convenção de integração reusável:** mesmo env-var `QUERY_STUDIO_TEST_PG_DSN`
+    das Fases 1b/2a. O teste da `api` constrói `&API{Pool: pool}` e injeta o
+    usuário no contexto via `context.WithValue(ctx, ctxKeyUserID, uid)` +
+    `ctxKeyRole`; para `{id}` injeta um `chi.NewRouteContext()` em
+    `chi.RouteCtxKey`. Reusar esse padrão para testar handlers com URL param.
+  - **`store.toMigrateURL`** agora é o ponto único de rewrite de scheme p/ o
+    golang-migrate (pgx5) — reusar em testes/ferramentas que precisem de um
+    `*migrate.Migrate`.
+  - **UI:** `EmptyState` usa props `title`/`description` (não children);
+    `Pagination` espera props derivadas do total. O overlay de histórico fecha ao
+    clicar no backdrop (`stopPropagation` no card).
+  - Go local via PowerShell (`go` no PATH); Bash tool **não** tem `go`. `npm run
+    build` emite `NativeCommandError` cosmético no PowerShell (stderr do vite) —
+    não é falha; conclui com `✓ built`.
+- **Testes:** `go build ./...` OK; `go vet ./internal/{api,store}/...` OK;
+  `go test ./...` OK (api: +4 unit de sessões); `go test -tags=integration ./...`
+  OK (novos testes de integração api/store auto-pulam sem DSN);
+  `./node_modules/.bin/tsc --noEmit -p .` OK; `npm run build` OK (`✓ built`).
 - **Commit:** (a cargo do orquestrador)
 

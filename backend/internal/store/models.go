@@ -137,3 +137,19 @@ type GroupVisibilityOverride struct {
 	GroupID uuid.UUID `json:"group_id"`
 	Show    bool      `json:"show"`
 }
+
+// QuerySession is a lightweight, per-user record of a Query Studio session:
+// the target connection, a title, the current SQL, the assistant chat transcript
+// and the last execution plan. Unlike tools, sessions are not versioned and are
+// outside the scope of the encrypted backup (like tokens/users).
+type QuerySession struct {
+	ID           uuid.UUID       `json:"id"`
+	ConnectionID uuid.UUID       `json:"connection_id"`
+	Title        string          `json:"title"`
+	QueryText    string          `json:"query_text"`
+	ChatLog      json.RawMessage `json:"chat_log"`
+	LastExplain  json.RawMessage `json:"last_explain,omitempty"`
+	CreatedBy    *uuid.UUID      `json:"created_by,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+}
