@@ -28,5 +28,7 @@ frontend/.vite/
 deploy/data/
 
 # >>> praxis (orquestrador de fases) — nao edite entre os marcadores >>>
-/automacao/
+/automacao/logs/
+/automacao/*.exe
+/automacao/fases-*.bak.csv
 # <<< praxis <<<
