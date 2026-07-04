@@ -45,6 +45,9 @@ const (
 	// queryStudioAnalyzeTimeout bounds an EXPLAIN ANALYZE, which executes the
 	// query for real. Kept short as a defence-in-depth measure.
 	queryStudioAnalyzeTimeout = 30 * time.Second
+	// queryStudioIntrospectTimeout bounds the best-effort rich introspection
+	// (FKs + indexes) done during a chat turn.
+	queryStudioIntrospectTimeout = 10 * time.Second
 )
 
 // clampPreviewLimit forces the preview row limit into the server-imposed range.
@@ -78,16 +81,33 @@ func (a *API) QueryStudioChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind := ""
+	var relations []drivers.Relation
+	var indexes []drivers.IndexInfo
 	if in.ConnectionID != uuid.Nil {
-		if err := a.Pool.QueryRow(r.Context(),
-			`SELECT type FROM connections WHERE id=$1`, in.ConnectionID).Scan(&kind); err != nil {
+		drv, err := a.openDriver(r, in.ConnectionID)
+		if err != nil {
 			writeErr(w, http.StatusBadRequest, "connection not found")
 			return
 		}
+		defer drv.Close()
+		kind = string(drv.Kind())
+		// Best-effort rich introspection: feed FK relations and existing indexes
+		// to the LLM so it proposes correct JOINs and avoids suggesting indexes
+		// that already exist. Only schema metadata (no row data) is sent. If the
+		// database is unreachable or lacks rich support, we still answer with
+		// the schema-only context supplied by the client.
+		ictx, cancel := context.WithTimeout(r.Context(), queryStudioIntrospectTimeout)
+		if graph, gerr := drivers.IntrospectRich(ictx, drv); gerr == nil && graph != nil {
+			relations = graph.Relations
+			indexes = graph.Indexes
+		}
+		cancel()
 	}
 	out, err := a.LLM.QueryStudioChat(r.Context(), llm.QueryStudioInput{
 		ConnectionKind: kind,
 		Tables:         in.Tables,
+		Relations:      relations,
+		Indexes:        indexes,
 		History:        in.Messages,
 		CurrentQuery:   in.CurrentQuery,
 		ExplainResult:  in.ExplainResult,

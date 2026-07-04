@@ -441,11 +441,11 @@ Depende de: Fase 1c
 **Meta:** enriquecer o schema com FKs e índices e alimentar o prompt para que o
 LLM proponha JOINs corretos e evite sugerir índices já existentes.
 
-- [ ] Adicionar `RichIntrospector`/`SchemaGraph`/`Relation`/`IndexInfo` (§7).
-- [ ] Implementar `IntrospectRich` para `pg` (`pg_constraint`, `pg_index`) e `mysql` (`KEY_COLUMN_USAGE`, `STATISTICS`).
-- [ ] Drivers sem suporte caem no `Introspect` simples.
-- [ ] Passar `Relations`/`Indexes` para `QueryStudioInput`; endpoint/handler consome a introspecção rica quando disponível.
-- [ ] Testes de parse dos catálogos + fallback.
+- [x] Adicionar `RichIntrospector`/`SchemaGraph`/`Relation`/`IndexInfo` (§7).
+- [x] Implementar `IntrospectRich` para `pg` (`pg_constraint`, `pg_index`) e `mysql` (`KEY_COLUMN_USAGE`, `STATISTICS`).
+- [x] Drivers sem suporte caem no `Introspect` simples.
+- [x] Passar `Relations`/`Indexes` para `QueryStudioInput`; endpoint/handler consome a introspecção rica quando disponível.
+- [x] Testes de parse dos catálogos + fallback.
 
 Depende de: Fase 1a, Fase 1c
 **Testes:** `go build ./...`, `go test ./internal/drivers/...`. Validação real via gate extra `integration-postgres`.
@@ -970,5 +970,93 @@ Formato sugerido por entrada:
 - **Testes:** `./node_modules/.bin/tsc --noEmit -p .` → OK (sem erros);
   `npm run build` → OK (`tsc -b && vite build`, `✓ built`). Backend não tocado
   nesta fase → gates Go não requeridos para 1d.
+- **Commit:** (a cargo do orquestrador)
+
+### Fase 2a — Introspecção rica (`IntrospectRich`) Postgres + MySQL no prompt (2026-07-03)
+- **Feito:**
+  - Novo `internal/drivers/rich.go`: tipos `Relation` (FK composta:
+    `FromColumns`/`ToColumns` são slices posicionais), `IndexInfo`
+    (nome/schema/tabela/colunas/unique), `SchemaGraph{Tables,Relations,Indexes}`
+    e a interface opcional `RichIntrospector{IntrospectRich(ctx) (*SchemaGraph,
+    error)}`. Helper de pacote **`drivers.IntrospectRich(ctx, d)`** — type-assert
+    para `RichIntrospector`; **fallback** para `d.Introspect` (Relations/Indexes
+    vazios) quando o driver não implementa. É o **ponto de entrada único** (mesmo
+    padrão de `drivers.Explain`). Helpers puros **`BuildRelations([]FKColumn)`** e
+    **`BuildIndexes([]IndexColumn)`** que agrupam linhas de catálogo (já ordenadas
+    por constraint/índice + ordinal) em entradas compostas — compartilhados por pg
+    e mysql e testados isoladamente.
+  - `pg/driver.go`: `IntrospectRich` reusa `Introspect` + `introspectRelations`
+    (`pg_constraint` com `unnest(conkey,confkey) WITH ORDINALITY` p/ FKs
+    compostas em ordem) + `introspectIndexes` (`pg_index` com
+    `unnest(indkey) WITH ORDINALITY`; `attnum > 0` descarta colunas de índices de
+    expressão). `var _ drivers.RichIntrospector = (*driver)(nil)`.
+  - `mysql/driver.go`: `IntrospectRich` via
+    `INFORMATION_SCHEMA.KEY_COLUMN_USAGE` (FKs; `REFERENCED_TABLE_NAME IS NOT
+    NULL`, ordenado por tabela+constraint+ORDINAL_POSITION) e
+    `INFORMATION_SCHEMA.STATISTICS` (índices; `NON_UNIQUE=0`→unique, ordenado por
+    SEQ_IN_INDEX). `var _ drivers.RichIntrospector = (*driver)(nil)`.
+  - `internal/llm/prompts.go`: `QueryStudioInput` ganhou
+    `Relations []drivers.Relation` e `Indexes []drivers.IndexInfo`. Extraí
+    **`buildQueryStudioContext(in)`** (função pura, testável) que renderiza as
+    seções "Foreign keys (use these for JOINs)" e "Existing indexes (do NOT
+    suggest an index that duplicates one of these)". Novo helper `qualifiedName`
+    (schema.table, respeitando Firebird sem schema); `formatTableForPrompt` agora
+    o reusa.
+  - `internal/api/handlers_query_studio.go`: `QueryStudioChat` agora abre o driver
+    (via `a.openDriver`) quando há `connection_id`, deriva `kind` de
+    `drv.Kind()` e faz **introspecção rica best-effort** (novo timeout
+    `queryStudioIntrospectTimeout=10s`), passando `Relations`/`Indexes` ao LLM.
+    Só metadados de schema vão ao LLM (§8.7) — nunca linhas. Falha de DB/introspecção
+    degrada para contexto schema-only (não quebra o chat).
+  - Testes: `internal/drivers/rich_test.go` (BuildRelations single/composto/mesmo
+    nome-de-constraint-em-tabelas-distintas; BuildIndexes unique+composto+vazio;
+    IntrospectRich delega e faz fallback); `internal/llm/query_studio_test.go`
+    (+3: render de FK/índice, Firebird sem schema, seções omitidas quando vazias);
+    `pg/driver_integration_test.go` (+`TestIntrospectRich_Integration`: provisiona
+    schema `qs_rich_test` parent/child+índice, valida FK e índice; auto-pula sem
+    `QUERY_STUDIO_TEST_PG_DSN`).
+- **Decisões / desvios:**
+  - **Introspecção rica é server-side e best-effort no `/chat`**, não veio do
+    cliente. Motivo: FKs/índices não estavam no payload do frontend (Fase 1d) e
+    exigem o driver de qualquer forma; buscar no servidor mantém a Fase 2a
+    **backend-only** (sem gate de frontend, coerente com os testes declarados).
+    **Não** alterei o endpoint `GET /connections/{id}/introspect` (ainda devolve
+    array de `Table`) para **não quebrar** a `QueryStudioPage`. **Para a Fase 3b/UI:**
+    se quiser exibir FKs/índices na árvore de schema, exponha um endpoint rico
+    novo (ex.: `?rich=1` ou rota dedicada) em vez de mudar o shape do atual.
+  - **`RichIntrospector.IntrospectRich` retorna `*SchemaGraph`** (ponteiro), não o
+    valor mostrado na §7 — consistência com `drivers.Explain`→`*ExplainResult` e
+    permite `nil`.
+  - **`Relation.FromColumns/ToColumns` são slices** (FKs compostas). Nomes de
+    constraint **não são globalmente únicos** — em pg podem repetir entre schemas,
+    em mysql entre tabelas — então `BuildRelations` agrupa por
+    `(from schema, from table, constraint)` e `BuildIndexes` por
+    `(schema, table, index name)`. Testes cobrem o caso "mesmo nome, tabelas
+    distintas".
+  - **Índices de expressão (pg) são ignorados** (`indkey` com attnum 0 não tem
+    coluna). Suficiente para o objetivo (evitar sugerir índice já existente por
+    coluna). **Fase 3b:** se precisar comparar planos com índices de expressão,
+    estender a query.
+  - **`kind` agora vem de `drv.Kind()`** (era `SELECT type FROM connections`). O
+    valor é o mesmo string ("pg"/"mysql"); economiza um SELECT já que abrimos o
+    driver de qualquer forma.
+- **Descobertas / para as próximas fases:**
+  - **Só `pg` e `mysql` implementam `RichIntrospector`.** mssql/oracle/firebird/
+    mongo/rest caem no fallback (Relations/Indexes vazios) — sem erro. A Fase 2c
+    (Explainer) é ortogonal a isto; se quiser introspecção rica nesses dialetos,
+    é trabalho adicional não previsto na 2a.
+  - **Contrato de `SchemaGraph` (JSON):** `{tables, relations:[{constraint_name,
+    from_schema,from_table,from_columns[],to_schema,to_table,to_columns[]}],
+    indexes:[{name,schema,table,columns[],unique}]}`. Reusável se a Fase 3b/UI
+    precisar transportá-lo.
+  - **Reuso para novos drivers:** implemente `IntrospectRich` escaneando as linhas
+    de catálogo (ordenadas) para `[]drivers.FKColumn`/`[]drivers.IndexColumn` e
+    chame `drivers.BuildRelations`/`BuildIndexes` — não reimplemente o
+    agrupamento.
+  - Go local disponível via PowerShell (`go` no PATH); Bash tool **não** tem `go`.
+- **Testes:** `go build ./...` OK; `go vet ./internal/{drivers,llm,api}/...` OK;
+  `go test ./...` OK (drivers: +7 rich; llm: +3 context; api inalterado passa);
+  `go test -tags=integration ./...` OK (pg rich/explain auto-pulam sem
+  `QUERY_STUDIO_TEST_PG_DSN`). Frontend não tocado.
 - **Commit:** (a cargo do orquestrador)
 

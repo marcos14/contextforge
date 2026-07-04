@@ -3,6 +3,8 @@ package llm
 import (
 	"strings"
 	"testing"
+
+	"github.com/marcos14/contextforge/backend/internal/drivers"
 )
 
 func TestParseQueryStudioOutput_FullProposal(t *testing.T) {
@@ -72,6 +74,55 @@ func TestParseQueryStudioOutput_MalformedJSON(t *testing.T) {
 func TestParseQueryStudioOutput_EmptyReplyRejected(t *testing.T) {
 	if _, err := parseQueryStudioOutput(`{"reply": "", "query": "SELECT 1"}`); err == nil {
 		t.Fatal("expected error when reply is empty")
+	}
+}
+
+func TestBuildQueryStudioContext_RelationsAndIndexes(t *testing.T) {
+	ctx := buildQueryStudioContext(QueryStudioInput{
+		ConnectionKind: "pg",
+		Tables: []drivers.Table{
+			{Schema: "public", Name: "orders", Columns: []drivers.Column{{Name: "id", Type: "int8"}}},
+		},
+		Relations: []drivers.Relation{
+			{ConstraintName: "fk_oc", FromSchema: "public", FromTable: "orders", FromColumns: []string{"customer_id"},
+				ToSchema: "public", ToTable: "customers", ToColumns: []string{"id"}},
+		},
+		Indexes: []drivers.IndexInfo{
+			{Name: "idx_orders_customer", Schema: "public", Table: "orders", Columns: []string{"customer_id"}},
+		},
+	})
+	if !strings.Contains(ctx, "Foreign keys") {
+		t.Fatalf("context missing FK section:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "public.orders(customer_id) -> public.customers(id)") {
+		t.Fatalf("FK not rendered as expected:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "Existing indexes") || !strings.Contains(ctx, "idx_orders_customer on public.orders (customer_id)") {
+		t.Fatalf("index not rendered as expected:\n%s", ctx)
+	}
+}
+
+func TestBuildQueryStudioContext_FirebirdOmitsSchema(t *testing.T) {
+	// Firebird has no schemas: FK/index references must be bare table names.
+	ctx := buildQueryStudioContext(QueryStudioInput{
+		ConnectionKind: "firebird",
+		Relations: []drivers.Relation{
+			{ConstraintName: "fk", FromSchema: "PUBLIC", FromTable: "CONTAS", FromColumns: []string{"CLIENTE_ID"},
+				ToSchema: "PUBLIC", ToTable: "CLIENTES", ToColumns: []string{"ID"}},
+		},
+	})
+	if strings.Contains(ctx, "PUBLIC.CONTAS") || strings.Contains(ctx, "PUBLIC.CLIENTES") {
+		t.Fatalf("firebird context must not qualify tables with a schema:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "CONTAS(CLIENTE_ID) -> CLIENTES(ID)") {
+		t.Fatalf("firebird FK not rendered bare:\n%s", ctx)
+	}
+}
+
+func TestBuildQueryStudioContext_OmitsEmptySections(t *testing.T) {
+	ctx := buildQueryStudioContext(QueryStudioInput{ConnectionKind: "pg"})
+	if strings.Contains(ctx, "Foreign keys") || strings.Contains(ctx, "Existing indexes") {
+		t.Fatalf("empty relations/indexes should not render a section:\n%s", ctx)
 	}
 }
 

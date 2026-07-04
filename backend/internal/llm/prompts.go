@@ -69,14 +69,19 @@ func dialectGuidance(kind string) string {
 	return ""
 }
 
-// formatTableForPrompt renders one table reference for the LLM. For drivers
-// without real schemas we omit the synthetic schema prefix so the model does
-// not paste it into SQL.
-func formatTableForPrompt(t drivers.Table, kind string) string {
-	if kind == "firebird" || t.Schema == "" {
-		return t.Name
+// qualifiedName renders a "schema.table" reference for the LLM. For drivers
+// without real schemas (firebird) or when no schema is known we emit the bare
+// name so the model does not paste a synthetic prefix into SQL.
+func qualifiedName(schema, name, kind string) string {
+	if kind == "firebird" || schema == "" {
+		return name
 	}
-	return t.Schema + "." + t.Name
+	return schema + "." + name
+}
+
+// formatTableForPrompt renders one table reference for the LLM.
+func formatTableForPrompt(t drivers.Table, kind string) string {
+	return qualifiedName(t.Schema, t.Name, kind)
 }
 
 // GenerateQuery asks the model to produce a query and params spec.
@@ -336,15 +341,18 @@ func (c *Client) ChatTool(ctx context.Context, in ChatToolInput) (*ChatToolOutpu
 // is to understand the need and propose performant, idiomatic SQL for the
 // connection's dialect.
 //
-// Only fields available in Fase 1 are declared here. Rich schema data (FK
-// relations + existing indexes) is added by Fase 2a via a RichIntrospector;
-// this struct will gain Relations/Indexes fields then.
+// Relations and Indexes carry the rich-introspection data (FK graph + existing
+// indexes) surfaced by drivers.RichIntrospector (Fase 2a). They let the model
+// propose correct JOINs and avoid suggesting indexes that already exist. Both
+// are optional: drivers without rich support leave them empty.
 type QueryStudioInput struct {
-	ConnectionKind string          // "pg" | "mysql" | "mssql" | "oracle" | "firebird" | ...
-	Tables         []drivers.Table // schema from Introspect
-	History        []Message       // conversation so far (user/assistant turns)
-	CurrentQuery   string          // query currently in the editor, if any
-	ExplainResult  string          // execution plan of the last validation (refine loop)
+	ConnectionKind string              // "pg" | "mysql" | "mssql" | "oracle" | "firebird" | ...
+	Tables         []drivers.Table     // schema from Introspect
+	Relations      []drivers.Relation  // foreign keys (rich introspection)
+	Indexes        []drivers.IndexInfo // existing indexes (rich introspection)
+	History        []Message           // conversation so far (user/assistant turns)
+	CurrentQuery   string              // query currently in the editor, if any
+	ExplainResult  string              // execution plan of the last validation (refine loop)
 }
 
 // QueryStudioOutput is a structured assistant turn. Reply is always present and
@@ -438,6 +446,27 @@ func queryStudioDialectGuidance(kind string) string {
 // dialect-aware performance system prompt, the schema, any current query and
 // the last EXPLAIN plan, then returns the structured proposal.
 func (c *Client) QueryStudioChat(ctx context.Context, in QueryStudioInput) (*QueryStudioOutput, error) {
+	msgs := []Message{
+		{Role: "system", Content: queryStudioSystem},
+		{Role: "system", Content: buildQueryStudioContext(in)},
+	}
+	if hint := queryStudioDialectGuidance(in.ConnectionKind); hint != "" {
+		msgs = append(msgs, Message{Role: "system", Content: hint})
+	}
+	msgs = append(msgs, in.History...)
+
+	raw, err := c.Chat(ctx, msgs, true)
+	if err != nil {
+		return nil, err
+	}
+	return parseQueryStudioOutput(raw)
+}
+
+// buildQueryStudioContext renders the schema-context system message: tables,
+// FK relations and existing indexes, plus the current query and last EXPLAIN
+// plan. Extracted as a pure function so its output can be unit-tested without a
+// live LLM.
+func buildQueryStudioContext(in QueryStudioInput) string {
 	var sb strings.Builder
 	sb.WriteString("Connection kind: ")
 	sb.WriteString(in.ConnectionKind)
@@ -451,6 +480,30 @@ func (c *Client) QueryStudioChat(ctx context.Context, in QueryStudioInput) (*Que
 			fmt.Fprintf(&sb, "    %s %s%s\n", col.Name, col.Type, nullableTag(col.Nullable))
 		}
 	}
+	if len(in.Relations) > 0 {
+		sb.WriteString("\nForeign keys (use these for JOINs):\n")
+		for _, rel := range in.Relations {
+			fmt.Fprintf(&sb, "- %s(%s) -> %s(%s)\n",
+				qualifiedName(rel.FromSchema, rel.FromTable, in.ConnectionKind),
+				strings.Join(rel.FromColumns, ", "),
+				qualifiedName(rel.ToSchema, rel.ToTable, in.ConnectionKind),
+				strings.Join(rel.ToColumns, ", "))
+		}
+	}
+	if len(in.Indexes) > 0 {
+		sb.WriteString("\nExisting indexes (do NOT suggest an index that duplicates one of these):\n")
+		for _, ix := range in.Indexes {
+			unique := ""
+			if ix.Unique {
+				unique = " UNIQUE"
+			}
+			fmt.Fprintf(&sb, "- %s on %s (%s)%s\n",
+				ix.Name,
+				qualifiedName(ix.Schema, ix.Table, in.ConnectionKind),
+				strings.Join(ix.Columns, ", "),
+				unique)
+		}
+	}
 	if in.CurrentQuery != "" {
 		sb.WriteString("\nCurrent query in the editor:\n")
 		sb.WriteString(in.CurrentQuery)
@@ -461,21 +514,7 @@ func (c *Client) QueryStudioChat(ctx context.Context, in QueryStudioInput) (*Que
 		sb.WriteString(truncate(in.ExplainResult, 8000))
 		sb.WriteString("\n")
 	}
-
-	msgs := []Message{
-		{Role: "system", Content: queryStudioSystem},
-		{Role: "system", Content: sb.String()},
-	}
-	if hint := queryStudioDialectGuidance(in.ConnectionKind); hint != "" {
-		msgs = append(msgs, Message{Role: "system", Content: hint})
-	}
-	msgs = append(msgs, in.History...)
-
-	raw, err := c.Chat(ctx, msgs, true)
-	if err != nil {
-		return nil, err
-	}
-	return parseQueryStudioOutput(raw)
+	return sb.String()
 }
 
 // parseQueryStudioOutput decodes and validates the model's JSON response.

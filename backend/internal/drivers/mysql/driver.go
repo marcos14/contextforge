@@ -67,6 +67,92 @@ ORDER  BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION`
 	return out, rows.Err()
 }
 
+// ensure mysql implements the optional rich-introspection capability.
+var _ drivers.RichIntrospector = (*driver)(nil)
+
+// IntrospectRich implements drivers.RichIntrospector for MySQL. It reuses
+// Introspect for tables and enriches it with foreign keys
+// (INFORMATION_SCHEMA.KEY_COLUMN_USAGE) and existing indexes
+// (INFORMATION_SCHEMA.STATISTICS).
+func (d *driver) IntrospectRich(ctx context.Context) (*drivers.SchemaGraph, error) {
+	tables, err := d.Introspect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	relations, err := d.introspectRelations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	indexes, err := d.introspectIndexes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &drivers.SchemaGraph{Tables: tables, Relations: relations, Indexes: indexes}, nil
+}
+
+func (d *driver) introspectRelations(ctx context.Context) ([]drivers.Relation, error) {
+	// REFERENCED_TABLE_NAME is non-null only for FK columns. ORDINAL_POSITION
+	// orders composite FK columns; CONSTRAINT_NAME is unique only within a
+	// table, so we order (and BuildRelations groups) by table + constraint.
+	const q = `
+SELECT CONSTRAINT_NAME, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME,
+       REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+FROM   INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+WHERE  REFERENCED_TABLE_NAME IS NOT NULL
+  AND  TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','sys')
+ORDER  BY TABLE_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION`
+	rows, err := d.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var acc []drivers.FKColumn
+	for rows.Next() {
+		var c drivers.FKColumn
+		if err := rows.Scan(&c.ConstraintName, &c.FromSchema, &c.FromTable, &c.FromColumn,
+			&c.ToSchema, &c.ToTable, &c.ToColumn); err != nil {
+			return nil, err
+		}
+		acc = append(acc, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return drivers.BuildRelations(acc), nil
+}
+
+func (d *driver) introspectIndexes(ctx context.Context) ([]drivers.IndexInfo, error) {
+	// NON_UNIQUE=0 means the index is unique. SEQ_IN_INDEX orders composite
+	// index columns.
+	const q = `
+SELECT INDEX_SCHEMA, TABLE_NAME, INDEX_NAME, NON_UNIQUE, COLUMN_NAME
+FROM   INFORMATION_SCHEMA.STATISTICS
+WHERE  TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','sys')
+  AND  COLUMN_NAME IS NOT NULL
+ORDER  BY INDEX_SCHEMA, TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`
+	rows, err := d.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var acc []drivers.IndexColumn
+	for rows.Next() {
+		var (
+			c         drivers.IndexColumn
+			nonUnique int
+		)
+		if err := rows.Scan(&c.Schema, &c.Table, &c.Name, &nonUnique, &c.Column); err != nil {
+			return nil, err
+		}
+		c.Unique = nonUnique == 0
+		acc = append(acc, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return drivers.BuildIndexes(acc), nil
+}
+
 func (d *driver) Execute(ctx context.Context, req drivers.ExecRequest) (*drivers.ExecResult, error) {
 	clean, err := drivers.EnforceReadOnly(req.Query)
 	if err != nil {

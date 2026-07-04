@@ -92,6 +92,109 @@ ORDER  BY n.nspname, c.relname, a.attnum`
 	return out, rows.Err()
 }
 
+// ensure pg implements the optional rich-introspection capability.
+var _ drivers.RichIntrospector = (*driver)(nil)
+
+// IntrospectRich implements drivers.RichIntrospector for PostgreSQL. It reuses
+// Introspect for the tables and enriches it with foreign keys (pg_constraint)
+// and existing indexes (pg_index). Expression index columns (attnum 0) are
+// skipped — only plain column indexes are reported.
+func (d *driver) IntrospectRich(ctx context.Context) (*drivers.SchemaGraph, error) {
+	tables, err := d.Introspect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	relations, err := d.introspectRelations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	indexes, err := d.introspectIndexes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &drivers.SchemaGraph{Tables: tables, Relations: relations, Indexes: indexes}, nil
+}
+
+func (d *driver) introspectRelations(ctx context.Context) ([]drivers.Relation, error) {
+	// unnest(conkey, confkey) WITH ORDINALITY expands composite FKs while
+	// preserving column order (ord), which BuildRelations relies on.
+	const q = `
+SELECT con.conname                        AS constraint_name,
+       ns.nspname                         AS from_schema,
+       cl.relname                         AS from_table,
+       att.attname                        AS from_column,
+       fns.nspname                        AS to_schema,
+       fcl.relname                        AS to_table,
+       fatt.attname                       AS to_column
+FROM   pg_constraint con
+JOIN   pg_class cl        ON cl.oid = con.conrelid
+JOIN   pg_namespace ns    ON ns.oid = cl.relnamespace
+JOIN   pg_class fcl       ON fcl.oid = con.confrelid
+JOIN   pg_namespace fns   ON fns.oid = fcl.relnamespace
+JOIN   LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(conkey, confkey, ord) ON true
+JOIN   pg_attribute att   ON att.attrelid = con.conrelid  AND att.attnum = k.conkey
+JOIN   pg_attribute fatt  ON fatt.attrelid = con.confrelid AND fatt.attnum = k.confkey
+WHERE  con.contype = 'f'
+  AND  ns.nspname NOT IN ('pg_catalog','information_schema')
+ORDER  BY ns.nspname, cl.relname, con.conname, k.ord`
+	rows, err := d.pool.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var acc []drivers.FKColumn
+	for rows.Next() {
+		var c drivers.FKColumn
+		if err := rows.Scan(&c.ConstraintName, &c.FromSchema, &c.FromTable, &c.FromColumn,
+			&c.ToSchema, &c.ToTable, &c.ToColumn); err != nil {
+			return nil, err
+		}
+		acc = append(acc, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return drivers.BuildRelations(acc), nil
+}
+
+func (d *driver) introspectIndexes(ctx context.Context) ([]drivers.IndexInfo, error) {
+	// unnest(indkey) WITH ORDINALITY preserves index column order. attnum > 0
+	// filters out expression-index entries (attnum 0), which have no column.
+	const q = `
+SELECT ns.nspname     AS schema,
+       t.relname      AS table_name,
+       i.relname      AS index_name,
+       ix.indisunique AS is_unique,
+       a.attname      AS column_name
+FROM   pg_index ix
+JOIN   pg_class i      ON i.oid = ix.indexrelid
+JOIN   pg_class t      ON t.oid = ix.indrelid
+JOIN   pg_namespace ns ON ns.oid = t.relnamespace
+JOIN   LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+JOIN   pg_attribute a  ON a.attrelid = t.oid AND a.attnum = k.attnum
+WHERE  ns.nspname NOT IN ('pg_catalog','information_schema')
+  AND  t.relkind IN ('r','p')
+  AND  k.attnum > 0
+ORDER  BY ns.nspname, t.relname, i.relname, k.ord`
+	rows, err := d.pool.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var acc []drivers.IndexColumn
+	for rows.Next() {
+		var c drivers.IndexColumn
+		if err := rows.Scan(&c.Schema, &c.Table, &c.Name, &c.Unique, &c.Column); err != nil {
+			return nil, err
+		}
+		acc = append(acc, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return drivers.BuildIndexes(acc), nil
+}
+
 func (d *driver) Execute(ctx context.Context, req drivers.ExecRequest) (*drivers.ExecResult, error) {
 	clean, err := drivers.EnforceReadOnly(req.Query)
 	if err != nil {
