@@ -39,6 +39,11 @@ type Config struct {
 
 	DefaultRowLimit int
 
+	// QueryStudioAllowAnalyze gates the EXPLAIN ANALYZE capability of the Query
+	// Studio module. When false, /query-studio/explain rejects analyze:true
+	// requests (defence in depth over the UI confirmation). Defaults to true.
+	QueryStudioAllowAnalyze bool
+
 	OTELEndpoint   string
 	OTELService    string
 	MetricsEnabled bool
@@ -75,25 +80,26 @@ func envBool(key string, def bool) bool {
 // Load reads configuration from environment variables.
 func Load() (*Config, error) {
 	c := &Config{
-		HTTPAddr:               envStr("HTTP_ADDR", ":8080"),
-		PublicBaseURL:          envStr("PUBLIC_BASE_URL", "http://localhost:8080"),
-		LogLevel:               envStr("LOG_LEVEL", "info"),
-		DatabaseURL:            os.Getenv("DATABASE_URL"),
-		RedisURL:               envStr("REDIS_URL", "redis://localhost:6379/0"),
-		JWTAccessTTL:           time.Duration(envInt("JWT_ACCESS_TTL_MINUTES", 60)) * time.Minute,
-		JWTRefreshTTL:          time.Duration(envInt("JWT_REFRESH_TTL_DAYS", 30)) * 24 * time.Hour,
-		RegistryRefresh:        time.Duration(envInt("REGISTRY_REFRESH_SECONDS", 5)) * time.Second,
-		RateLimitIPPerMin:      envInt("RATE_LIMIT_IP_PER_MIN", 600),
-		OpenRouterAPIKey:       os.Getenv("OPENROUTER_API_KEY"),
-		OpenRouterModel:        envStr("OPENROUTER_MODEL", "xiaomi/mimo-v2.5"),
-		OpenRouterBaseURL:      envStr("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-		OpenRouterTimeout:      time.Duration(envInt("OPENROUTER_TIMEOUT_SECONDS", 60)) * time.Second,
-		BootstrapAdminEmail:    envStr("BOOTSTRAP_ADMIN_EMAIL", "admin@example.com"),
-		BootstrapAdminPassword: os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
-		DefaultRowLimit:        envInt("TOOL_DEFAULT_ROW_LIMIT", 1000),
-		OTELEndpoint:           os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
-		OTELService:            envStr("OTEL_SERVICE_NAME", "contextforge"),
-		MetricsEnabled:         envBool("METRICS_ENABLED", true),
+		HTTPAddr:                envStr("HTTP_ADDR", ":8080"),
+		PublicBaseURL:           envStr("PUBLIC_BASE_URL", "http://localhost:8080"),
+		LogLevel:                envStr("LOG_LEVEL", "info"),
+		DatabaseURL:             os.Getenv("DATABASE_URL"),
+		RedisURL:                envStr("REDIS_URL", "redis://localhost:6379/0"),
+		JWTAccessTTL:            time.Duration(envInt("JWT_ACCESS_TTL_MINUTES", 60)) * time.Minute,
+		JWTRefreshTTL:           time.Duration(envInt("JWT_REFRESH_TTL_DAYS", 30)) * 24 * time.Hour,
+		RegistryRefresh:         time.Duration(envInt("REGISTRY_REFRESH_SECONDS", 5)) * time.Second,
+		RateLimitIPPerMin:       envInt("RATE_LIMIT_IP_PER_MIN", 600),
+		OpenRouterAPIKey:        os.Getenv("OPENROUTER_API_KEY"),
+		OpenRouterModel:         envStr("OPENROUTER_MODEL", "xiaomi/mimo-v2.5"),
+		OpenRouterBaseURL:       envStr("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+		OpenRouterTimeout:       time.Duration(envInt("OPENROUTER_TIMEOUT_SECONDS", 60)) * time.Second,
+		BootstrapAdminEmail:     envStr("BOOTSTRAP_ADMIN_EMAIL", "admin@example.com"),
+		BootstrapAdminPassword:  os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
+		DefaultRowLimit:         envInt("TOOL_DEFAULT_ROW_LIMIT", 1000),
+		QueryStudioAllowAnalyze: envBool("QUERY_STUDIO_ALLOW_ANALYZE", true),
+		OTELEndpoint:            os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		OTELService:             envStr("OTEL_SERVICE_NAME", "contextforge"),
+		MetricsEnabled:          envBool("METRICS_ENABLED", true),
 	}
 
 	if origins := os.Getenv("CORS_ALLOWED_ORIGINS"); origins != "" {

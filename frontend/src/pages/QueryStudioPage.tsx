@@ -97,6 +97,14 @@ export type PromoteToolState = {
 export function QueryStudioPage() {
   const navigate = useNavigate();
   const conns = useQuery({ queryKey: ["conns"], queryFn: () => api<Conn[]>("/api/connections") });
+  // Server capabilities: EXPLAIN ANALYZE can be disabled by configuration
+  // (QUERY_STUDIO_ALLOW_ANALYZE=false). Default to true until it resolves so the
+  // button is not briefly hidden on load; if the fetch fails we keep it hidden.
+  const caps = useQuery({
+    queryKey: ["query-studio-caps"],
+    queryFn: () => api<{ allow_analyze: boolean }>("/api/query-studio/capabilities"),
+  });
+  const allowAnalyze = caps.data ? caps.data.allow_analyze : !caps.isError;
 
   const [connId, setConnId] = useState("");
   const [tables, setTables] = useState<TableInfo[]>([]);
@@ -365,6 +373,7 @@ export function QueryStudioPage() {
   const runExplain = (analyze: boolean) => {
     if (!query.trim()) return;
     if (!connId) return;
+    if (analyze && !allowAnalyze) return;
     if (analyze) {
       const ok = window.confirm(
         "EXPLAIN ANALYZE executa a query de verdade no banco (com timeout curto). " +
@@ -745,15 +754,17 @@ export function QueryStudioPage() {
               >
                 {explain.isPending ? "..." : "EXPLAIN"}
               </button>
-              <button
-                type="button"
-                className="text-xs px-2 py-1 border border-amber-300 bg-amber-50 text-amber-800 rounded hover:bg-amber-100 disabled:opacity-50"
-                onClick={() => runExplain(true)}
-                disabled={!query.trim() || !connId || !explainSupported || explain.isPending}
-                title="Executa a query de verdade (com timeout curto). Requer confirmação."
-              >
-                EXPLAIN ANALYZE
-              </button>
+              {allowAnalyze && (
+                <button
+                  type="button"
+                  className="text-xs px-2 py-1 border border-amber-300 bg-amber-50 text-amber-800 rounded hover:bg-amber-100 disabled:opacity-50"
+                  onClick={() => runExplain(true)}
+                  disabled={!query.trim() || !connId || !explainSupported || explain.isPending}
+                  title="Executa a query de verdade (com timeout curto). Requer confirmação."
+                >
+                  EXPLAIN ANALYZE
+                </button>
+              )}
               <button
                 type="button"
                 className="text-xs px-2 py-1 border border-border rounded hover:bg-muted disabled:opacity-50"
@@ -765,6 +776,9 @@ export function QueryStudioPage() {
               </button>
               {!explainSupported && connId && (
                 <Badge variant="muted">EXPLAIN indisponível ({selectedConn?.type})</Badge>
+              )}
+              {explainSupported && !allowAnalyze && (
+                <Badge variant="muted">ANALYZE desabilitado por configuração</Badge>
               )}
             </div>
 

@@ -139,6 +139,12 @@ func (a *API) QueryStudioExplain(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Defence in depth over the UI confirmation: when EXPLAIN ANALYZE is
+	// disabled by configuration, reject analyze:true before touching the DB.
+	if in.Analyze && !a.AllowAnalyze {
+		writeErr(w, http.StatusForbidden, "EXPLAIN ANALYZE is disabled by configuration")
+		return
+	}
 	if in.ConnectionID == uuid.Nil {
 		writeErr(w, http.StatusBadRequest, "connection_id is required")
 		return
@@ -220,4 +226,16 @@ func (a *API) QueryStudioPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+type queryStudioCapabilities struct {
+	// AllowAnalyze reports whether the server accepts EXPLAIN ANALYZE requests.
+	// The UI hides/disables the EXPLAIN ANALYZE button when this is false.
+	AllowAnalyze bool `json:"allow_analyze"`
+}
+
+// QueryStudioCapabilities reports the server-side capabilities of the module so
+// the UI can adapt (e.g. hide the EXPLAIN ANALYZE button when disabled).
+func (a *API) QueryStudioCapabilities(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, queryStudioCapabilities{AllowAnalyze: a.AllowAnalyze})
 }

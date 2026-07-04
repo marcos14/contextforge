@@ -525,10 +525,10 @@ Depende de: Fase 1d
 **Meta:** tornar o `EXPLAIN ANALYZE` desabilitável por configuração (defesa em
 profundidade sobre a confirmação da UI).
 
-- [ ] Flag em `internal/config/config.go` (ex.: `QUERY_STUDIO_ALLOW_ANALYZE`).
-- [ ] Handler `/explain` respeita a flag (rejeita `analyze:true` quando desligado).
-- [ ] UI oculta/desabilita o botão conforme capacidade retornada.
-- [ ] Teste de handler para a flag.
+- [x] Flag em `internal/config/config.go` (ex.: `QUERY_STUDIO_ALLOW_ANALYZE`).
+- [x] Handler `/explain` respeita a flag (rejeita `analyze:true` quando desligado).
+- [x] UI oculta/desabilita o botão conforme capacidade retornada.
+- [x] Teste de handler para a flag.
 
 Depende de: Fase 1c
 **Testes:** `go build ./...`, `go test ./internal/api/...`, `./node_modules/.bin/tsc --noEmit -p .`, `npm run build`.
@@ -1441,5 +1441,70 @@ Formato sugerido por entrada:
 - **Testes:** `./node_modules/.bin/tsc --noEmit -p .` → OK (projeto inteiro, sem
   erros); `npm run build` → OK (`tsc -b && vite build`, `✓ built`). Backend não
   tocado → gates Go não requeridos para 3c.
+- **Commit:** (a cargo do orquestrador)
+
+### Fase 3d — Config para habilitar/desabilitar `EXPLAIN ANALYZE` (2026-07-04)
+- **Feito:**
+  - `internal/config/config.go`: novo campo `QueryStudioAllowAnalyze bool`,
+    carregado de `envBool("QUERY_STUDIO_ALLOW_ANALYZE", true)` — **default
+    `true`** (preserva o comportamento atual; a flag é defesa em profundidade
+    para desligar o ANALYZE, não um opt-in).
+  - `internal/api/api.go`: campo `AllowAnalyze bool` no struct `API`; wired em
+    `cmd/contextforge/main.go` a partir de `cfg.QueryStudioAllowAnalyze`.
+  - `internal/api/handlers_query_studio.go`: `QueryStudioExplain` rejeita
+    `analyze:true` com **403 Forbidden** quando `!a.AllowAnalyze`. A checagem
+    fica **logo após `EnforceSelectOnly` e antes do guard de `connection_id`**,
+    de modo que a rejeição não depende de driver/conexão (torna o teste puro,
+    sem DB). Novo endpoint `GET /query-studio/capabilities` →
+    `{"allow_analyze": bool}` (tipo `queryStudioCapabilities`) para a UI
+    descobrir a capacidade. Rota registrada em `handlers_llm_router.go::Mount`
+    no grupo `RequireAuth("admin","editor")`.
+  - `frontend/src/pages/QueryStudioPage.tsx`: nova query TanStack
+    `["query-studio-caps"]` → `/api/query-studio/capabilities`; derivada
+    `allowAnalyze` (default `true` enquanto carrega; `false` se a fetch falha —
+    fail-safe). O botão **EXPLAIN ANALYZE é ocultado** quando `!allowAnalyze`;
+    badge `muted` "ANALYZE desabilitado por configuração" aparece quando o
+    EXPLAIN é suportado mas o ANALYZE está desligado; `runExplain(true)` tem
+    guard defensivo `if (analyze && !allowAnalyze) return`.
+  - Testes de handler em `handlers_query_studio_test.go`:
+    `TestQueryStudioExplain_AnalyzeDisabled` (403 + mensagem "disabled"),
+    `..._PlainExplainAllowed` (EXPLAIN sem ANALYZE não é bloqueado pela flag →
+    cai no guard de connection_id), `..._AnalyzeEnabled` (flag ligada não
+    bloqueia analyze:true) e `TestQueryStudioCapabilities` (JSON reflete a flag
+    p/ true e false).
+- **Decisões / desvios:**
+  - **Default `true`**: manter compat com o comportamento pré-3d. Para desligar,
+    setar `QUERY_STUDIO_ALLOW_ANALYZE=0/false/no/off` (o helper `envBool` já
+    aceita esses valores; qualquer outro valor cai no default `true`).
+  - **Endpoint de capabilities** (não previsto explicitamente no PLANO, mas
+    exigido pelo checkbox "UI oculta/desabilita o botão conforme capacidade
+    retornada"): optei por um `GET /capabilities` dedicado em vez de embutir a
+    flag em outra resposta, para ser um ponto único e extensível (futuras
+    capacidades do módulo entram no mesmo objeto). **Para fases futuras:** se
+    precisarem expor mais capacidades server-side ao front, estender
+    `queryStudioCapabilities` e o objeto retornado por `QueryStudioCapabilities`.
+  - **403 vs 400**: usei `http.StatusForbidden` (capacidade desligada por
+    política do servidor), distinto do `400` de validação SELECT-only e do
+    `400` de connection_id ausente — assim o front pode diferenciar se quiser.
+  - **UI: ocultar em vez de desabilitar** o botão — menos ruído do que um botão
+    permanentemente cinza; a badge explica o porquê. A auditoria de ANALYZE
+    (Fase 1c) permanece intacta para quando a flag está ligada.
+- **Descobertas / para as próximas fases:**
+  - `config.envBool(key, def)` já existe e trata `1/true/yes/on` e
+    `0/false/no/off` (case-insensitive); reusar para novas flags booleanas.
+  - **Gotcha de ambiente:** `go`/`gofmt` **não estão no PATH do Bash** nesta
+    máquina — usar o tool **PowerShell** (`go` resolve via
+    `C:\Users\marco\.local\bin\go.cmd`). `go fmt ./pkg/` reformatou também
+    arquivos vizinhos já existentes (alinhamento de structs) — mudanças
+    cosméticas, sem impacto funcional.
+  - **Gotcha do Grep:** a ferramenta Grep não casou termos deste `PLANO.md`
+    (encoding); usar `Read` por offset para localizar/editar seções aqui.
+  - O padrão de teste de handler "puro" (`&API{...}` + `postJSON`, validando
+    antes de tocar DB) continua válido: colocar novas checagens de política
+    **antes** do guard de conexão mantém os testes sem necessidade de driver.
+- **Testes (todos verdes):** PowerShell, em `backend/`:
+  `go build ./...` → OK; `go test ./...` → OK (api inclui os 4 novos testes de
+  3d; nada quebrado). Em `frontend/`: `./node_modules/.bin/tsc --noEmit -p .`
+  → OK; `npm run build` → OK (`✓ built`).
 - **Commit:** (a cargo do orquestrador)
 

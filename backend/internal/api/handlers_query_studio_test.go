@@ -15,9 +15,9 @@ func TestClampPreviewLimit(t *testing.T) {
 	cases := []struct {
 		in, want int
 	}{
-		{0, queryStudioPreviewMaxRows},   // unset → forced max
-		{-5, queryStudioPreviewMaxRows},  // negative → forced max
-		{10, 10},                         // within range → honoured
+		{0, queryStudioPreviewMaxRows},  // unset → forced max
+		{-5, queryStudioPreviewMaxRows}, // negative → forced max
+		{10, 10},                        // within range → honoured
 		{queryStudioPreviewMaxRows, queryStudioPreviewMaxRows},
 		{queryStudioPreviewMaxRows + 1, queryStudioPreviewMaxRows}, // over → capped
 		{100000, queryStudioPreviewMaxRows},                        // absurd → capped
@@ -62,10 +62,10 @@ var nonSelectQueries = []string{
 	"DROP TABLE users",
 	"INSERT INTO users VALUES (1)",
 	"TRUNCATE users",
-	"EXPLAIN SELECT 1",              // raw EXPLAIN is rejected: the backend wraps it
-	"SHOW TABLES",                   // SHOW is rejected too
-	"SELECT 1; DROP TABLE users",    // multi-statement
-	"",                              // empty
+	"EXPLAIN SELECT 1",           // raw EXPLAIN is rejected: the backend wraps it
+	"SHOW TABLES",                // SHOW is rejected too
+	"SELECT 1; DROP TABLE users", // multi-statement
+	"",                           // empty
 }
 
 func TestQueryStudioPreview_RejectsNonSelect(t *testing.T) {
@@ -115,6 +115,74 @@ func TestQueryStudioExplain_ValidSelectRequiresConnection(t *testing.T) {
 	}
 	if msg := decodeErr(t, rec); !strings.Contains(msg, "connection_id") {
 		t.Errorf("error = %q, want it to mention connection_id", msg)
+	}
+}
+
+// When EXPLAIN ANALYZE is disabled by configuration, a valid SELECT with
+// analyze:true must be rejected with 403 BEFORE any connection/driver work,
+// regardless of whether a connection is supplied.
+func TestQueryStudioExplain_AnalyzeDisabled(t *testing.T) {
+	a := &API{AllowAnalyze: false}
+	rec := postJSON(t, a.QueryStudioExplain, queryStudioExplainReq{
+		Query:   "SELECT id FROM users",
+		Analyze: true,
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body %q)", rec.Code, rec.Body.String())
+	}
+	if msg := decodeErr(t, rec); !strings.Contains(strings.ToLower(msg), "disabled") {
+		t.Errorf("error = %q, want it to mention the feature is disabled", msg)
+	}
+}
+
+// With ANALYZE disabled, a non-analyze EXPLAIN must NOT be blocked by the flag:
+// it proceeds past the flag check and stops on the missing-connection guard.
+func TestQueryStudioExplain_AnalyzeDisabled_PlainExplainAllowed(t *testing.T) {
+	a := &API{AllowAnalyze: false}
+	rec := postJSON(t, a.QueryStudioExplain, queryStudioExplainReq{
+		Query:   "SELECT id FROM users",
+		Analyze: false,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
+	}
+	if msg := decodeErr(t, rec); !strings.Contains(msg, "connection_id") {
+		t.Errorf("error = %q, want it to mention connection_id", msg)
+	}
+}
+
+// With ANALYZE enabled, a valid analyze:true request passes the flag check and
+// stops on the missing-connection guard (proving the flag does not block it).
+func TestQueryStudioExplain_AnalyzeEnabled(t *testing.T) {
+	a := &API{AllowAnalyze: true}
+	rec := postJSON(t, a.QueryStudioExplain, queryStudioExplainReq{
+		Query:   "SELECT id FROM users",
+		Analyze: true,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
+	}
+	if msg := decodeErr(t, rec); !strings.Contains(msg, "connection_id") {
+		t.Errorf("error = %q, want it to mention connection_id", msg)
+	}
+}
+
+func TestQueryStudioCapabilities(t *testing.T) {
+	for _, allow := range []bool{true, false} {
+		a := &API{AllowAnalyze: allow}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rec := httptest.NewRecorder()
+		a.QueryStudioCapabilities(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("allow=%v: status = %d, want 200", allow, rec.Code)
+		}
+		var got queryStudioCapabilities
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("allow=%v: decode %q: %v", allow, rec.Body.String(), err)
+		}
+		if got.AllowAnalyze != allow {
+			t.Errorf("allow=%v: AllowAnalyze = %v, want %v", allow, got.AllowAnalyze, allow)
+		}
 	}
 }
 

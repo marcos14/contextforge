@@ -172,6 +172,7 @@ func main() {
 		Pool: pool, Signer: signer, Cipher: cipher,
 		Registry: reg, Executor: exec, CodeRuntime: codeRT, LLM: llmClient, Cache: cch,
 		DefaultRowLimit: cfg.DefaultRowLimit,
+		AllowAnalyze:    cfg.QueryStudioAllowAnalyze,
 	}
 	r.Route("/api", apiSrv.Mount)
 

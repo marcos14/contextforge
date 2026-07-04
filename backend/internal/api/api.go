@@ -31,6 +31,9 @@ type API struct {
 	LLM             *llm.Client
 	Cache           *cache.Cache
 	DefaultRowLimit int
+	// AllowAnalyze gates the EXPLAIN ANALYZE capability of Query Studio. When
+	// false, QueryStudioExplain rejects analyze:true requests.
+	AllowAnalyze bool
 }
 
 type ctxKey int
