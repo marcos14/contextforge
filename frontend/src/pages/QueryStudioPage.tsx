@@ -112,10 +112,16 @@ export function QueryStudioPage() {
   const [pendingExplain, setPendingExplain] = useState("");
   const [explainResult, setExplainResult] = useState<ExplainResp | null>(null);
   const [previewResult, setPreviewResult] = useState<PreviewResp | null>(null);
+  // Plan comparison (Fase 3b): a baseline plan is snapshotted from the current
+  // EXPLAIN result; after the user applies a suggested index in their DB (the
+  // module never runs DDL) and re-runs EXPLAIN, the "Comparação" tab shows the
+  // baseline vs. the current plan side by side with the estimated cost/rows delta.
+  const [baselinePlan, setBaselinePlan] = useState<ExplainResp | null>(null);
+  const [baselineNote, setBaselineNote] = useState("");
   const [tableSearch, setTableSearch] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [copied, setCopied] = useState(false);
-  const [rightTab, setRightTab] = useState<"plan" | "preview">("plan");
+  const [rightTab, setRightTab] = useState<"plan" | "preview" | "compare">("plan");
 
   // ---- Session history (Fase 2b) ----
   const qc = useQueryClient();
@@ -144,6 +150,8 @@ export function QueryStudioPage() {
     setExplainResult(null);
     setPreviewResult(null);
     setPendingExplain("");
+    setBaselinePlan(null);
+    setBaselineNote("");
   }, [connId]);
 
   // SQL autocomplete schema derived from the introspected tables (same shape as
@@ -314,6 +322,8 @@ export function QueryStudioPage() {
       setExplainResult(s.last_explain || null);
       setPendingExplain("");
       setPreviewResult(null);
+      setBaselinePlan(null);
+      setBaselineNote("");
       // Restore the SQL/perf panels from the last assistant proposal, if any.
       const lastProposal = [...log].reverse().find((m) => m.role === "assistant" && m.query);
       if (lastProposal) {
@@ -363,6 +373,23 @@ export function QueryStudioPage() {
       if (!ok) return;
     }
     explain.mutate(analyze);
+  };
+
+  // Snapshot the current EXPLAIN result as the comparison baseline (Fase 3b).
+  // The user then applies a suggested index in their DB and re-runs EXPLAIN; the
+  // "Comparação" tab contrasts this baseline with the fresh plan.
+  const captureBaseline = () => {
+    if (!explainResult) return;
+    setBaselinePlan(explainResult);
+    // If a single index was suggested, pre-label the baseline with it; otherwise
+    // leave the note empty for the user to fill via the compare tab's selector.
+    setBaselineNote(suggestedIndexes.length === 1 ? suggestedIndexes[0] : "");
+  };
+
+  const clearBaseline = () => {
+    setBaselinePlan(null);
+    setBaselineNote("");
+    if (rightTab === "compare") setRightTab("plan");
   };
 
   const copyQuery = async () => {
@@ -779,8 +806,8 @@ export function QueryStudioPage() {
               </div>
             )}
 
-            {/* --- Plano / Preview --- */}
-            {(explainResult || previewResult || explain.error || preview.error) && (
+            {/* --- Plano / Preview / Comparação --- */}
+            {(explainResult || previewResult || explain.error || preview.error || baselinePlan) && (
               <div className="border border-border rounded">
                 <div className="flex items-center border-b border-border text-xs">
                   <button
@@ -803,6 +830,19 @@ export function QueryStudioPage() {
                   >
                     Preview
                   </button>
+                  {baselinePlan && (
+                    <button
+                      type="button"
+                      className={
+                        "px-3 py-1.5 flex items-center gap-1 " +
+                        (rightTab === "compare" ? "font-semibold border-b-2 border-primary" : "text-muted-foreground")
+                      }
+                      onClick={() => setRightTab("compare")}
+                    >
+                      Comparação
+                      <Badge variant="info">baseline</Badge>
+                    </button>
+                  )}
                 </div>
                 <div className="p-2">
                   {rightTab === "plan" &&
@@ -812,11 +852,25 @@ export function QueryStudioPage() {
                       </div>
                     ) : explainResult ? (
                       <div className="space-y-1">
-                        <div className="flex items-center gap-2 text-xs">
+                        <div className="flex items-center gap-2 text-xs flex-wrap">
                           <Badge variant="info">{explainResult.dialect}</Badge>
                           {explainResult.analyze && <Badge variant="warning">ANALYZE (executado)</Badge>}
                           <span className="text-muted-foreground">{explainResult.format}</span>
+                          <button
+                            type="button"
+                            className="ml-auto text-xs px-2 py-0.5 border border-border rounded hover:bg-muted"
+                            onClick={captureBaseline}
+                            title="Guardar este plano como baseline para comparar depois de aplicar um índice sugerido"
+                          >
+                            {baselinePlan ? "Redefinir baseline" : "Definir como baseline"}
+                          </button>
                         </div>
+                        {baselinePlan && (
+                          <div className="text-[11px] text-muted-foreground">
+                            Baseline guardado. Aplique um índice sugerido no banco, rode EXPLAIN
+                            novamente e abra a aba <strong>Comparação</strong>.
+                          </div>
+                        )}
                         <pre className="font-mono text-[11px] bg-muted/40 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-72 overflow-y-auto">
 {explainResult.plan}
                         </pre>
@@ -871,6 +925,16 @@ export function QueryStudioPage() {
                         Rode Preview para ver uma amostra.
                       </div>
                     ))}
+                  {rightTab === "compare" && (
+                    <PlanComparison
+                      baseline={baselinePlan}
+                      current={explainResult}
+                      note={baselineNote}
+                      indexes={suggestedIndexes}
+                      onNote={setBaselineNote}
+                      onClear={clearBaseline}
+                    />
+                  )}
                 </div>
               </div>
             )}
@@ -1053,4 +1117,217 @@ function formatCell(v: any): string {
   if (v === null || v === undefined) return "—";
   if (typeof v === "object") return JSON.stringify(v);
   return String(v);
+}
+
+// ============================================================================
+// Plan comparison (Fase 3b)
+// ============================================================================
+
+// Comparable metrics extracted best-effort from an EXPLAIN plan. Only JSON plans
+// (Postgres `FORMAT JSON`, MySQL `FORMAT=JSON`) expose machine-readable numbers;
+// text/xml plans (MySQL ANALYZE / MSSQL) return null and are shown side by side
+// without a numeric delta.
+type PlanMetrics = {
+  totalCost?: number;
+  planRows?: number;
+  actualTime?: number;
+  actualRows?: number;
+};
+
+function num(v: any): number | undefined {
+  if (v === null || v === undefined) return undefined;
+  const n = typeof v === "number" ? v : parseFloat(String(v));
+  return Number.isFinite(n) ? n : undefined;
+}
+
+export function extractPlanMetrics(plan: string, format: string): PlanMetrics | null {
+  if (format !== "json" || !plan) return null;
+  let parsed: any;
+  try {
+    parsed = JSON.parse(plan);
+  } catch {
+    return null;
+  }
+  // Postgres: array (or object) whose root carries a "Plan" node.
+  const pgRoot = Array.isArray(parsed) ? parsed[0] : parsed;
+  if (pgRoot && pgRoot.Plan) {
+    const p = pgRoot.Plan;
+    return {
+      totalCost: num(p["Total Cost"]),
+      planRows: num(p["Plan Rows"]),
+      actualTime: num(p["Actual Total Time"]),
+      actualRows: num(p["Actual Rows"]),
+    };
+  }
+  // MySQL FORMAT=JSON: query_block.cost_info.query_cost.
+  const qb = parsed?.query_block;
+  if (qb) {
+    const table = qb.table || {};
+    return {
+      totalCost: num(qb?.cost_info?.query_cost),
+      planRows: num(table?.rows_examined_per_scan ?? table?.rows_produced_per_join),
+    };
+  }
+  return null;
+}
+
+// deltaPct returns the signed percentage change from baseline to current
+// (negative = improvement, i.e. lower cost/rows/time). null when incomparable.
+export function deltaPct(baseline?: number, current?: number): number | null {
+  if (baseline === undefined || current === undefined || baseline === 0) return null;
+  return ((current - baseline) / baseline) * 100;
+}
+
+function fmtNum(v?: number): string {
+  if (v === undefined) return "—";
+  return v.toLocaleString("pt-BR", { maximumFractionDigits: 2 });
+}
+
+// PlanComparison contrasts a baseline plan with the current plan (Fase 3b),
+// showing the estimated cost/rows/time delta and both plan texts side by side.
+function PlanComparison({
+  baseline,
+  current,
+  note,
+  indexes,
+  onNote,
+  onClear,
+}: {
+  baseline: ExplainResp | null;
+  current: ExplainResp | null;
+  note: string;
+  indexes: string[];
+  onNote: (v: string) => void;
+  onClear: () => void;
+}) {
+  if (!baseline) {
+    return (
+      <div className="text-xs text-muted-foreground p-1">
+        Nenhum baseline definido. Rode EXPLAIN e clique em “Definir como baseline”.
+      </div>
+    );
+  }
+
+  const mb = extractPlanMetrics(baseline.plan, baseline.format);
+  const mc = current ? extractPlanMetrics(current.plan, current.format) : null;
+  const rows: { label: string; b?: number; c?: number }[] = [
+    { label: "Custo estimado", b: mb?.totalCost, c: mc?.totalCost },
+    { label: "Linhas estimadas", b: mb?.planRows, c: mc?.planRows },
+    { label: "Tempo real (ms)", b: mb?.actualTime, c: mc?.actualTime },
+    { label: "Linhas reais", b: mb?.actualRows, c: mc?.actualRows },
+  ].filter((r) => r.b !== undefined || r.c !== undefined);
+
+  const sameFormat = !current || baseline.format === current.format;
+
+  return (
+    <div className="space-y-3 text-xs">
+      <div className="flex items-center gap-2 flex-wrap">
+        <Badge variant="muted">baseline</Badge>
+        <span className="text-muted-foreground">vs.</span>
+        <Badge variant="info">plano atual</Badge>
+        <button
+          type="button"
+          className="ml-auto px-2 py-0.5 border border-border rounded hover:bg-muted"
+          onClick={onClear}
+        >
+          Limpar baseline
+        </button>
+      </div>
+
+      {/* Which suggested index this comparison evaluates. */}
+      <div className="space-y-1">
+        <div className="font-semibold text-muted-foreground">Índice avaliado (opcional)</div>
+        {indexes.length > 0 ? (
+          <select
+            className="w-full border border-border rounded px-2 py-1 text-xs font-mono"
+            value={note}
+            onChange={(e) => onNote(e.target.value)}
+          >
+            <option value="">— nenhum / anotação livre —</option>
+            {indexes.map((idx, i) => (
+              <option key={i} value={idx}>
+                {idx}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            className="w-full border border-border rounded px-2 py-1 text-xs font-mono"
+            placeholder="Ex.: CREATE INDEX ... (aplicado no banco antes do 2º EXPLAIN)"
+            value={note}
+            onChange={(e) => onNote(e.target.value)}
+          />
+        )}
+      </div>
+
+      {!current ? (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded p-2">
+          Baseline guardado. Aplique o índice no banco, rode <strong>EXPLAIN</strong> novamente
+          para gerar o plano atual e compará-los aqui.
+        </div>
+      ) : (
+        <>
+          {rows.length > 0 ? (
+            <table className="w-full border-collapse">
+              <thead>
+                <tr>
+                  <th className="border border-border px-2 py-1 text-left bg-muted/40">Métrica</th>
+                  <th className="border border-border px-2 py-1 text-right bg-muted/40">Baseline</th>
+                  <th className="border border-border px-2 py-1 text-right bg-muted/40">Atual</th>
+                  <th className="border border-border px-2 py-1 text-right bg-muted/40">Variação</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => {
+                  const d = deltaPct(r.b, r.c);
+                  const improved = d !== null && d < 0;
+                  const worse = d !== null && d > 0;
+                  return (
+                    <tr key={r.label}>
+                      <td className="border border-border px-2 py-1">{r.label}</td>
+                      <td className="border border-border px-2 py-1 text-right font-mono">
+                        {fmtNum(r.b)}
+                      </td>
+                      <td className="border border-border px-2 py-1 text-right font-mono">
+                        {fmtNum(r.c)}
+                      </td>
+                      <td
+                        className={
+                          "border border-border px-2 py-1 text-right font-mono " +
+                          (improved ? "text-green-700" : worse ? "text-red-700" : "text-muted-foreground")
+                        }
+                      >
+                        {d === null ? "—" : `${d > 0 ? "+" : ""}${d.toFixed(1)}%`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          ) : (
+            <div className="text-muted-foreground">
+              {sameFormat
+                ? "Este formato de plano não expõe métricas numéricas comparáveis; veja os planos lado a lado abaixo."
+                : `Formatos diferentes (${baseline.format} vs. ${current.format}) — comparação apenas textual.`}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            <div>
+              <div className="font-semibold text-muted-foreground mb-1">Baseline ({baseline.format})</div>
+              <pre className="font-mono text-[11px] bg-muted/40 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-60 overflow-y-auto">
+{baseline.plan}
+              </pre>
+            </div>
+            <div>
+              <div className="font-semibold text-muted-foreground mb-1">Atual ({current.format})</div>
+              <pre className="font-mono text-[11px] bg-muted/40 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-60 overflow-y-auto">
+{current.plan}
+              </pre>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
 }

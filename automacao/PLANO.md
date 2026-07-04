@@ -501,8 +501,8 @@ Depende de: Fase 1d
 **Meta:** permitir comparar o plano de execução antes e depois de aplicar um
 índice sugerido, evidenciando o ganho estimado.
 
-- [ ] UI para armazenar e comparar dois `ExplainResult` (baseline vs. proposto).
-- [ ] Suporte no handler/`/explain` para retornar plano comparável (se necessário).
+- [x] UI para armazenar e comparar dois `ExplainResult` (baseline vs. proposto).
+- [x] Suporte no handler/`/explain` para retornar plano comparável (se necessário).
 
 Depende de: Fase 1d, Fase 2a
 **Testes:** `./node_modules/.bin/tsc --noEmit -p .`, `npm run build`, `go build ./...`, `go test ./internal/api/...` (se o backend mudar).
@@ -1293,5 +1293,86 @@ Formato sugerido por entrada:
 - **Testes:** `./node_modules/.bin/tsc --noEmit -p .` → OK (projeto inteiro, sem
   erros); `npm run build` → OK (`tsc -b && vite build`, `✓ built`). Backend não
   tocado nesta fase → gates Go não requeridos para 3a.
+- **Commit:** (a cargo do orquestrador)
+
+### Fase 3b — Comparação de planos (antes/depois de índice sugerido) (2026-07-04)
+- **Feito:**
+  - **`QueryStudioPage.tsx`** — comparação de dois `ExplainResult` inteiramente
+    no cliente (nenhuma mudança de backend). Novos states `baselinePlan:
+    ExplainResp | null` e `baselineNote: string`. O tipo `rightTab` ganhou o
+    valor `"compare"` (além de `plan`/`preview`).
+    - **Capturar baseline:** botão **"Definir como baseline"** (vira "Redefinir
+      baseline") no cabeçalho de metadados do plano (aba *Plano de execução*),
+      visível sempre que há um `explainResult`. `captureBaseline()` copia o
+      `explainResult` atual para `baselinePlan` e, se houver **exatamente um**
+      índice sugerido, pré-preenche `baselineNote` com ele.
+    - **Aba "Comparação"** — aparece na barra de abas só quando há `baselinePlan`
+      (com um `Badge` "baseline"). Renderiza o novo componente `PlanComparison`.
+    - **`PlanComparison`** mostra: seletor do "Índice avaliado" (dropdown dos
+      `suggestedIndexes`, ou input livre quando não há índices sugeridos, ligado a
+      `baselineNote`); tabela de métricas **Baseline × Atual × Variação (%)**
+      (verde = melhora/custo menor, vermelho = piora); e os **dois planos lado a
+      lado** (`grid md:grid-cols-2`). Botão **"Limpar baseline"** (`clearBaseline`,
+      volta para a aba `plan`).
+    - **Fluxo de uso (documentar p/ usuários):** rodar EXPLAIN → "Definir como
+      baseline" → aplicar o índice sugerido **manualmente no banco** (o módulo
+      **nunca** executa DDL, §8.1) → rodar EXPLAIN de novo → abrir "Comparação".
+      Enquanto `baselinePlan` existe mas ainda não há `explainResult` novo,
+      um aviso âmbar orienta o próximo passo.
+  - **Helpers puros exportados** (no rodapé do arquivo, ao lado de `formatCell`):
+    - `extractPlanMetrics(plan, format)` — extrai `{totalCost, planRows,
+      actualTime, actualRows}` **best-effort** e **só de planos `format:"json"`**.
+      Postgres: raiz array/obj com nó `Plan` → `Total Cost`/`Plan Rows`/`Actual
+      Total Time`/`Actual Rows`. MySQL `FORMAT=JSON`: `query_block.cost_info.
+      query_cost` (+ `rows_examined_per_scan`/`rows_produced_per_join`). Retorna
+      `null` para `text` (MySQL ANALYZE/TREE) e `xml` (MSSQL) → nesses casos a UI
+      cai no **diff textual lado a lado** (sem % de variação).
+    - `deltaPct(baseline, current)` — variação percentual sinalizada (negativo =
+      melhora); `null` quando incomparável (baseline 0/ausente).
+- **Decisões / desvios:**
+  - **Backend NÃO mudou (checkbox "se necessário" = não necessário).** O
+    `/explain` já devolve o plano completo e comparável (`ExplainResult{dialect,
+    plan,format,analyze}`); o mesmo endpoint gera o baseline e o plano pós-índice.
+    Toda a comparação é client-side → **gates Go não requeridos** para 3b (rodei
+    `go build ./...` mesmo assim: OK). Isso mantém a fase alinhada ao aviso da
+    Fase 2c: **formatos de plano heterogêneos** (json/text/xml) — a UI trata por
+    `format` e só extrai métricas de JSON.
+  - **Comparação é efêmera (não persistida).** `baselinePlan`/`baselineNote`
+    **não** entram no `save/loadSession` (Fase 2b) nem no shape de `QuerySession`
+    — são resetados na troca de conexão e no `loadSession`. Motivo: o baseline é
+    um artefato de trabalho de uma iteração de otimização, não parte do estado
+    salvo da sessão. **Para uma fase futura:** se quiser histórico de comparações,
+    persistir `baseline_explain` em `query_sessions` (nova coluna + migration).
+  - **"Índice avaliado" é rótulo, não execução.** O dropdown só documenta qual
+    `suggested_index` o usuário aplicou manualmente antes do 2º EXPLAIN —
+    coerente com §8.1 (índices são texto, nunca executados pelo módulo). Não há
+    HypoPG/índice hipotético; o ganho é medido comparando dois EXPLAIN reais.
+  - **Reuso do componente `Badge`** (variants `info`/`muted`/`warning`) e do
+    padrão de abas já existente na coluna 3. Nenhuma dependência nova.
+- **Descobertas / para as próximas fases:**
+  - **Nomes reais (contrato de UI):** aba `rightTab === "compare"`; componente
+    `PlanComparison({baseline, current, note, indexes, onNote, onClear})`;
+    helpers `extractPlanMetrics(plan, format)` e `deltaPct(baseline, current)`
+    exportados de `QueryStudioPage.tsx` (reusáveis por teste/Fase 3c).
+  - **Fase 3c (anti-padrões):** `performanceNotes`/`assumptions` seguem
+    renderizados como listas simples; para destacá-los com `Badge`/cores, o ponto
+    é o bloco "Notas de performance" na coluna 3 (por volta de onde `suggestedIndexes`
+    é renderizado). O padrão de cores verde/vermelho já usado em `PlanComparison`
+    (delta) serve de referência.
+  - **Fase 3d (config ANALYZE):** a UI ainda decide EXPLAIN só por dialeto
+    (`EXPLAIN_KINDS`); quando o backend expuser a flag `QUERY_STUDIO_ALLOW_ANALYZE`,
+    condicionar o botão "EXPLAIN ANALYZE" a essa capacidade (nada nesta fase mexeu
+    nisso).
+  - **Métricas extraíveis por dialeto (estado atual):** só `pg` e `mysql`
+    (`format:"json"`) rendem tabela de variação; `mssql` (xml) e MySQL ANALYZE
+    (text/TREE) caem no diff textual. Se a Fase 2c ganhar EXPLAIN JSON em mais
+    dialetos, `extractPlanMetrics` só precisa de um novo ramo de parse.
+  - `npm run build` no PowerShell conclui com `✓ built` (aviso de chunk >500 kB
+    cosmético/pré-existente; `2>$null` evita o `NativeCommandError` do stderr do
+    vite).
+- **Testes:** `./node_modules/.bin/tsc --noEmit -p .` → OK (sem erros);
+  `npm run build` → OK (`✓ built`); `go build ./...` → OK (backend intocado,
+  rodado por garantia). `go test ./internal/api/...` não requerido (backend não
+  mudou).
 - **Commit:** (a cargo do orquestrador)
 
