@@ -1,11 +1,13 @@
 import { keepPreviousData, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRef, useEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../auth";
 import { Badge } from "../components/Badge";
 import { EmptyState } from "../components/EmptyState";
 import { Pagination } from "../components/Pagination";
 import { CodeEditor, type SqlSchema } from "../components/CodeEditor";
 import { fmtDate } from "../utils/format";
+import type { PromoteToolState } from "./QueryStudioPage";
 
 const HELP_DISMISSED_KEY = "mcpb_help_tools_dismissed";
 
@@ -166,6 +168,8 @@ function extractSelectAliases(sql: string): string[] {
 
 export function ToolsPage() {
   const qc = useQueryClient();
+  const location = useLocation();
+  const navigate = useNavigate();
   const tools = useQuery({ queryKey: ["tools"], queryFn: () => api<any[]>("/api/tools") });
   const groups = useQuery({ queryKey: ["groups"], queryFn: () => api<any[]>("/api/groups") });
   const conns = useQuery({ queryKey: ["conns"], queryFn: () => api<any[]>("/api/connections") });
@@ -323,6 +327,37 @@ export function ToolsPage() {
   useEffect(() => {
     chatEnd.current?.scrollIntoView({ behavior: "smooth" });
   }, [chat]);
+
+  // "Promover a Tool" bridge (Fase 3a): when Query Studio navigates here with a
+  // PromoteToolState in the router state, seed a fresh query-tool draft with the
+  // query/connection/explanation already filled in. We clear the router state
+  // afterwards so a refresh or back-navigation does not re-apply the prefill.
+  useEffect(() => {
+    const promote = (location.state as { promote?: PromoteToolState } | null)?.promote;
+    if (!promote) return;
+    setEditingId(null);
+    setF({
+      ...INITIAL_FORM,
+      kind: "query",
+      connection_id: promote.connection_id ?? "",
+      query_text: promote.query_text || INITIAL_FORM.query_text,
+      title: promote.title ?? "",
+      description: promote.description ?? "",
+    });
+    setChat([
+      {
+        role: "assistant",
+        content:
+          "Query importada do Query Studio. Ajuste slug, título e parâmetros conforme " +
+          "necessário e salve (o dry-run roda antes de ativar).",
+      },
+    ]);
+    setLastTest(null);
+    setTables([]);
+    navigate(location.pathname, { replace: true, state: null });
+    formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state]);
 
   // Reset introspect cache when connection changes. We do NOT clear the
   // chat log here anymore: chat history belongs to the tool, not to a

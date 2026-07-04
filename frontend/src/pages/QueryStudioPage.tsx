@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../auth";
 import { Badge } from "../components/Badge";
@@ -82,7 +83,19 @@ type SessionPage = {
 // this heuristic and the backend ever diverge.
 const EXPLAIN_KINDS = new Set(["pg", "postgres", "postgresql", "mysql", "mssql"]);
 
+// Payload handed to ToolsPage (via router state) by "Promover a Tool". The Tools
+// form reads it from location.state and seeds a new query tool draft. Keep the
+// field names aligned with ToolsPage's form (kind/connection_id/query_text/...).
+export type PromoteToolState = {
+  kind: "query";
+  connection_id?: string;
+  query_text: string;
+  title?: string;
+  description?: string;
+};
+
 export function QueryStudioPage() {
+  const navigate = useNavigate();
   const conns = useQuery({ queryKey: ["conns"], queryFn: () => api<Conn[]>("/api/connections") });
 
   const [connId, setConnId] = useState("");
@@ -377,6 +390,21 @@ export function QueryStudioPage() {
     URL.revokeObjectURL(url);
   };
 
+  // Bridge to the Tools module (Fase 3a): open the tool-creation flow with the
+  // current query/explanation pre-filled. We navigate to /tools carrying a
+  // PromoteToolState in the router state; ToolsPage seeds its existing form from
+  // it. Nothing here creates a tool — the user finishes the flow in ToolsPage.
+  const promoteToTool = () => {
+    if (!query.trim()) return;
+    const state: PromoteToolState = {
+      kind: "query",
+      connection_id: connId || undefined,
+      query_text: query,
+      description: explanation || undefined,
+    };
+    navigate("/tools", { state: { promote: state } });
+  };
+
   const insertRef = (ref: string) => {
     setChatInput((prev) => (prev ? `${prev} ${ref}` : ref));
     chatInputRef.current?.focus();
@@ -652,6 +680,15 @@ export function QueryStudioPage() {
                 disabled={!query}
               >
                 Exportar .sql
+              </button>
+              <button
+                type="button"
+                className="text-xs px-2 py-1 border border-primary bg-primary/10 text-primary rounded hover:bg-primary/20 disabled:opacity-50"
+                onClick={promoteToTool}
+                disabled={!query.trim()}
+                title="Abre o cadastro de Tools com esta query já preenchida"
+              >
+                Promover a Tool
               </button>
             </div>
           </div>

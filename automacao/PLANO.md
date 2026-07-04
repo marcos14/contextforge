@@ -489,8 +489,8 @@ Depende de: Fase 1b
 **Meta:** ponte entre Query Studio e o fluxo de Tools, pré-preenchendo a criação
 de tool a partir da query atual.
 
-- [ ] Ação/atalho na `QueryStudioPage` que abre o fluxo de criação de tool com query/explicação pré-preenchidas.
-- [ ] Reusar rotas/estado existentes de `ToolsPage`.
+- [x] Ação/atalho na `QueryStudioPage` que abre o fluxo de criação de tool com query/explicação pré-preenchidas.
+- [x] Reusar rotas/estado existentes de `ToolsPage`.
 
 Depende de: Fase 1d
 **Testes:** `./node_modules/.bin/tsc --noEmit -p .`, `npm run build`.
@@ -1237,5 +1237,61 @@ Formato sugerido por entrada:
   `go test ./...` OK (novos: mysql +1, mssql +1, oracle +2, firebird +1;
   demais pacotes inalterados); `go build -tags=integration ./...` OK;
   `./node_modules/.bin/tsc --noEmit -p .` OK; `npm run build` OK (`✓ built`).
+- **Commit:** (a cargo do orquestrador)
+
+### Fase 3a — Botão "Promover a Tool" (2026-07-04)
+- **Feito:**
+  - **`QueryStudioPage.tsx`**: novo botão **"Promover a Tool"** no cabeçalho da
+    coluna "SQL & Performance" (ao lado de Copiar / Exportar .sql), habilitado
+    só quando há `query.trim()`. Handler `promoteToTool()` monta um objeto
+    `PromoteToolState` (`{kind:"query", connection_id?, query_text, description?}`)
+    e faz `navigate("/tools", { state: { promote } })` via `useNavigate` do
+    `react-router-dom`. Não cria a tool — apenas leva o usuário ao fluxo de
+    Tools já pré-preenchido. Exportei o **tipo** `PromoteToolState` do módulo
+    (contrato compartilhado com a ToolsPage).
+  - **`ToolsPage.tsx`**: consome `location.state.promote` (via `useLocation`).
+    Um `useEffect([location.state])` faz o seed do form existente: `setF({
+    ...INITIAL_FORM, kind:"query", connection_id, query_text, title, description })`,
+    reseta `editingId`/`lastTest`/`tables`, injeta uma mensagem do assistente no
+    chat ("Query importada do Query Studio…"), rola até o form (`formRef`) e
+    **limpa o router state** (`navigate(pathname, { replace:true, state:null })`)
+    para que refresh/voltar não reapliquem o prefill. Import de tipo:
+    `import type { PromoteToolState } from "./QueryStudioPage"`.
+- **Decisões / desvios:**
+  - **Ponte via router state (não query params nem store global).** A `ToolsPage`
+    guarda todo o form em `useState(INITIAL_FORM)` — não há store compartilhado.
+    O caminho idiomático de React Router v6 (`navigate` com `state` + `useLocation`)
+    reusa o **estado existente** do form sem introduzir Context/Redux/URL params,
+    atendendo ao checkbox "reusar rotas/estado existentes de ToolsPage". Rotas
+    inalteradas (`/tools` já existia em `main.tsx`).
+  - **Prefill mínimo e seguro:** `query_text = query`, `description = explanation`,
+    `connection_id = connId` (mesma tabela `connections` nos dois módulos → o id
+    casa direto no dropdown da ToolsPage), `kind = "query"`. **Não** preenchi
+    `slug`/`title`/`params_schema` — o usuário define slug (constraint
+    `^[a-z0-9_]{1,64}$`) e parâmetros na ToolsPage; o `params_schema` fica no
+    default `{"type":"object","properties":{}}`. `suggested_indexes`/
+    `performance_notes` **não** são levados (são texto informativo do Query
+    Studio; poluiriam o SQL/descrição). O dry-run da ToolsPage roda antes de
+    ativar, como sempre.
+  - **SQL preservado intacto:** não injetei comentários/índices no `query_text`
+    para manter a query idêntica à validada por EXPLAIN no Query Studio.
+- **Descobertas / para as próximas fases:**
+  - **Contrato da ponte (nome real):** router state `{ promote: PromoteToolState }`,
+    onde `PromoteToolState = { kind:"query"; connection_id?:string; query_text:string;
+    title?:string; description?:string }` — exportado de `QueryStudioPage.tsx`.
+    A `ToolsPage` limpa o state após aplicar (idempotente a refresh).
+  - **Reuso para Fase 3b/3c:** o mesmo padrão `navigate(state)` + `useEffect(
+    [location.state])` + limpeza serve para levar outros artefatos (ex.: plano
+    baseline/proposto da 3b) entre páginas sem store global. `formRef` na
+    ToolsPage já existe e é o ponto de scroll ao seedar.
+  - **`INITIAL_FORM` da ToolsPage** é o baseline canônico do form; para pré-preencher
+    faça spread sobre ele. `params_schema` default é
+    `{"type":"object","properties":{}}` (string).
+  - Frontend: `npm run build` no PowerShell conclui com `✓ built`; o aviso de
+    chunk >500 kB é cosmético/pré-existente (bundle único). O `2>$null` no
+    PowerShell evita o `NativeCommandError` cosmético do stderr do vite.
+- **Testes:** `./node_modules/.bin/tsc --noEmit -p .` → OK (projeto inteiro, sem
+  erros); `npm run build` → OK (`tsc -b && vite build`, `✓ built`). Backend não
+  tocado nesta fase → gates Go não requeridos para 3a.
 - **Commit:** (a cargo do orquestrador)
 
