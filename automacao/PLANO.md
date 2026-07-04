@@ -426,11 +426,11 @@ Depende de: Fase 1a, Fase 1b
 `/explain`, `/preview`, com seleção de conexão, schema via `Introspect` atual,
 editor SQL e o loop de refino (reenvio do `ExplainResult` ao LLM).
 
-- [ ] Criar `frontend/src/pages/QueryStudioPage.tsx` (layout de 3 colunas da §6.2).
-- [ ] Menu em `App.tsx` (`links`) + rota em `main.tsx` sob `RequireAuth` admin+editor.
-- [ ] Queries TanStack: `["conns"]`, introspecção sob demanda; mutations de chat/explain/preview.
-- [ ] Botões: EXPLAIN, EXPLAIN ANALYZE (com confirmação), Preview, Copiar, Exportar `.sql`.
-- [ ] Loop de refino: enviar `ExplainResult` de volta ao `/chat`.
+- [x] Criar `frontend/src/pages/QueryStudioPage.tsx` (layout de 3 colunas da §6.2).
+- [x] Menu em `App.tsx` (`links`) + rota em `main.tsx` sob `RequireAuth` admin+editor.
+- [x] Queries TanStack: `["conns"]`, introspecção sob demanda; mutations de chat/explain/preview.
+- [x] Botões: EXPLAIN, EXPLAIN ANALYZE (com confirmação), Preview, Copiar, Exportar `.sql`.
+- [x] Loop de refino: enviar `ExplainResult` de volta ao `/chat`.
 
 Depende de: Fase 1c
 **Testes:** `./node_modules/.bin/tsc --noEmit -p .`, `npm run build`.
@@ -890,5 +890,85 @@ Formato sugerido por entrada:
   `go test ./...` OK (pacote `api` agora com 7 testes novos, todos passando;
   demais pacotes inalterados); `go test -tags=integration ./...` OK (pg
   auto-pula sem DSN).
+- **Commit:** (a cargo do orquestrador)
+
+### Fase 1d — Página `QueryStudioPage` (MVP UI + loop de refino) (2026-07-03)
+- **Feito:**
+  - Nova página `frontend/src/pages/QueryStudioPage.tsx` com o layout de 3
+    colunas da §6.2: **Schema** (árvore navegável de tabelas → colunas, com
+    filtro; clicar em tabela/coluna insere a referência no chat), **Requisito**
+    (chat livre em PT, histórico + input com Enter/Shift+Enter, renderiza
+    `reply`, `assumptions` e a query proposta com botão "Usar esta query") e
+    **SQL & Performance** (`CodeEditor` SQL com autocomplete alimentado pelo
+    schema introspectado; Explicação, Índices sugeridos, Notas de performance;
+    abas Plano de execução / Preview; botões EXPLAIN, EXPLAIN ANALYZE (com
+    `window.confirm`), Preview, Copiar (clipboard), Exportar `.sql`).
+  - Menu em `App.tsx`: novo ícone `IconQueryStudio` + entry
+    `{ to: "/query-studio", label: "Query Studio" }` no grupo **Catálogo**,
+    logo abaixo de **Tools** (§3). Rota em `main.tsx` sob `RequireAuth`
+    (import de `QueryStudioPage` + `<Route path="/query-studio">`).
+  - Queries/mutations TanStack: `["conns"]` → `/api/connections`; introspecção
+    sob demanda → `/api/connections/{id}/introspect`; mutations para
+    `/api/query-studio/{chat,explain,preview}`.
+  - **Loop de refino:** o `plan` retornado pelo `/explain` é guardado em
+    `pendingExplain` e enviado como `explain_result` na **próxima** mensagem de
+    `/chat`, sendo limpo logo após (para não reenviar em loop). Um aviso visual
+    ("Plano de execução será enviado ao assistente na próxima mensagem")
+    aparece enquanto há plano pendente.
+- **Decisões / desvios:**
+  - **Gating de EXPLAIN por tipo de conexão no cliente.** A Fase 1c faz o
+    `/explain` responder **422** quando o driver não implementa `Explainer`
+    (só `pg` na Fase 1b). Para não deixar o usuário clicar num botão que sempre
+    falha, a UI desabilita EXPLAIN/EXPLAIN ANALYZE quando
+    `conn.type` ∉ {`pg`,`postgres`,`postgresql`} (`EXPLAIN_KINDS`) e mostra um
+    `Badge` "EXPLAIN indisponível". **Para a Fase 2c:** ao adicionar `Explain`
+    a mysql/mssql/oracle/firebird, **incluir esses `type`s em `EXPLAIN_KINDS`**
+    em `QueryStudioPage.tsx` (constante no topo do arquivo). O 422 continua
+    sendo o fallback correto se a heurística e o backend divergirem.
+  - **Auto-aplicação da proposta.** Diferente da `ToolsPage` (que só popula o
+    form ao clicar "Usar esta query"), aqui a última proposta do assistente é
+    **auto-aplicada** ao editor SQL + painéis (Explicação/Índices/Notas), pois
+    o Query Studio é um workspace de **uma query só** — isso torna o loop
+    (descrever → EXPLAIN → refinar) mais fluido. O botão "Usar esta query"
+    permanece em cada proposta do histórico para reaplicar uma versão anterior.
+  - **Preview envia só `{connection_id, query}`** (sem `row_limit`) — o backend
+    impõe o LIMIT (100) via `clampPreviewLimit`. As linhas do preview ficam
+    **no cliente** e **nunca** são reenviadas ao `/chat` (§8.7); só o plano de
+    EXPLAIN volta ao LLM.
+  - **Sem role-guard de rota.** O projeto não tem componente de proteção por
+    role em `main.tsx` (só `RequireAuth` de autenticação; visibilidade fina é
+    por menu, como já ocorre com Tools). Mantive esse padrão — a fronteira
+    admin+editor é garantida no **backend** (Fase 1c). A `Fase 2b/3a` que
+    precisar esconder itens por role deve seguir o padrão de `adminGroup` em
+    `App.tsx`.
+  - **Contrato consumido (nomes reais):** `/chat` recebe
+    `{connection_id, tables, messages:[{role,content}], current_query,
+    explain_result}` e responde `{reply, query, explanation, suggested_indexes,
+    performance_notes, assumptions}`. `/explain` recebe
+    `{connection_id, query, analyze}` e responde
+    `{dialect, plan, format, analyze}`. `/preview` recebe
+    `{connection_id, query}` e responde `{columns, rows, count}`.
+- **Descobertas / para as próximas fases:**
+  - `CodeEditor` (`components/CodeEditor.tsx`) aceita `sqlSchema: Record<string,
+    string[]>` (mapa `schema.table`/`table` → colunas) para autocomplete —
+    reusei a mesma derivação da `ToolsPage`. `EmptyState` **não** aceita
+    `children`: usar as props `title`/`description`.
+  - `conns.data[].type` guarda o tipo do driver (ex.: `"pg"`, `"mysql"`); é a
+    fonte usada para decidir suporte a EXPLAIN no cliente.
+  - **Para a Fase 3a ("Promover a Tool"):** o estado da query pronta vive em
+    `QueryStudioPage` como `query`/`explanation`/`suggestedIndexes`/
+    `performanceNotes`/`assumptions` — reusar esses states para pré-preencher o
+    fluxo da `ToolsPage`. **Para a Fase 3c (anti-padrões):** `performanceNotes`
+    e `assumptions` já são renderizados como listas — basta adicionar destaque
+    (`Badge`/cores). **Para a Fase 3d (config ANALYZE):** hoje a UI só oculta
+    EXPLAIN por dialeto; quando o backend expuser a capacidade de ANALYZE
+    (flag), condicionar o botão "EXPLAIN ANALYZE" a essa capacidade.
+  - `npm run build` no Windows/PowerShell emite um `NativeCommandError`
+    cosmético (PowerShell embrulha o stderr do vite com o aviso de chunk
+    >500 kB); **não é falha** — o build conclui com `✓ built`. O aviso de
+    tamanho de chunk é **pré-existente** (bundle único), não introduzido aqui.
+- **Testes:** `./node_modules/.bin/tsc --noEmit -p .` → OK (sem erros);
+  `npm run build` → OK (`tsc -b && vite build`, `✓ built`). Backend não tocado
+  nesta fase → gates Go não requeridos para 1d.
 - **Commit:** (a cargo do orquestrador)
 

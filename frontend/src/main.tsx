@@ -9,6 +9,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { ConnectionsPage } from "./pages/ConnectionsPage";
 import { GroupsPage } from "./pages/GroupsPage";
 import { ToolsPage } from "./pages/ToolsPage";
+import { QueryStudioPage } from "./pages/QueryStudioPage";
 import { TokensPage } from "./pages/TokensPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { ConnectClientsPage } from "./pages/ConnectClientsPage";
@@ -45,6 +46,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <Route path="/connections" element={<ConnectionsPage />} />
             <Route path="/groups" element={<GroupsPage />} />
             <Route path="/tools" element={<ToolsPage />} />
+            <Route path="/query-studio" element={<QueryStudioPage />} />
             <Route path="/tokens" element={<TokensPage />} />
             <Route path="/backup" element={<BackupPage />} />
             <Route path="/admin/users" element={<UsersPage />} />

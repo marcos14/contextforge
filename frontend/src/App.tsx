@@ -46,6 +46,15 @@ const IconGroups = I(
 const IconTools = I(
   <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4 2.5-2.5z" />,
 );
+const IconQueryStudio = I(
+  <>
+    <ellipse cx="12" cy="5" rx="8" ry="3" />
+    <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+    <path d="M4 11v5c0 1.66 3.58 3 8 3" />
+    <circle cx="17.5" cy="17.5" r="3" />
+    <path d="M22 22l-2.1-2.1" />
+  </>,
+);
 const IconTokens = I(
   <>
     <circle cx="8" cy="14" r="4" />
@@ -132,6 +141,7 @@ const groups: NavGroup[] = [
       { to: "/connections", label: "Conexões", Icon: IconConnections },
       { to: "/groups", label: "Grupos", Icon: IconGroups },
       { to: "/tools", label: "Tools", Icon: IconTools },
+      { to: "/query-studio", label: "Query Studio", Icon: IconQueryStudio },
     ],
   },
   {
