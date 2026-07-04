@@ -513,8 +513,8 @@ Depende de: Fase 1d, Fase 2a
 **Meta:** destacar na UI os anti-padrões reportados em `performance_notes`
 (SELECT *, função em coluna indexada, OFFSET alto, etc.).
 
-- [ ] Renderização visual dos `performance_notes`/`assumptions` com destaque (`Badge`/cores).
-- [ ] Marcadores no editor/painel de notas.
+- [x] Renderização visual dos `performance_notes`/`assumptions` com destaque (`Badge`/cores).
+- [x] Marcadores no editor/painel de notas.
 
 Depende de: Fase 1d
 **Testes:** `./node_modules/.bin/tsc --noEmit -p .`, `npm run build`.
@@ -1374,5 +1374,72 @@ Formato sugerido por entrada:
   `npm run build` → OK (`✓ built`); `go build ./...` → OK (backend intocado,
   rodado por garantia). `go test ./internal/api/...` não requerido (backend não
   mudou).
+- **Commit:** (a cargo do orquestrador)
+
+### Fase 3c — Detecção visual de anti-padrões (2026-07-04)
+- **Feito:** (frontend-only, apenas `QueryStudioPage.tsx` + import de tipo do `Badge`)
+  - **Realce das `performance_notes`:** novo componente `PerformanceNotesPanel`
+    substitui a antiga lista `<ul class="list-disc">` na coluna 3. Cada nota
+    passa por `classifyNote(text)` (helper puro exportado) que a mapeia para uma
+    **categoria de anti-padrão** com **severidade** (`danger`/`warning`/`info`)
+    via catálogo de regexes `NOTE_CATEGORIES` (ordem = mais severo primeiro; 1º
+    match vence; fallback neutro "Nota"/info). A nota vira um card com
+    **borda-esquerda colorida + tint** (`SEVERITY_ACCENT`) e um `Badge` com o
+    rótulo da categoria (`SEVERITY_VARIANT` → variants `danger`/`warning`/`info`
+    do `Badge`). Categorias cobertas: SELECT *, Varredura completa (full/seq
+    scan, sem WHERE), Produto cartesiano, Função em coluna (sargability), OFFSET
+    alto, Subconsulta correlacionada, IN (subquery), LIKE '%…', Cast implícito,
+    Índice ausente, Ordenação custosa. Regexes aceitam PT **e** EN (o LLM pode
+    misturar termos).
+  - **`assumptions` na coluna 3:** o mesmo `PerformanceNotesPanel` agora também
+    lista as premissas (antes só apareciam por-mensagem no chat), cada uma com
+    `Badge variant="muted"` "premissa". (As premissas por-mensagem no histórico
+    do chat foram mantidas — não removi nada.)
+  - **Marcadores no editor:** novo componente `QueryMarkers` renderizado
+    **logo abaixo do `CodeEditor`**, mostrando badges de anti-padrões detectados
+    **diretamente no texto SQL atual** via `detectQueryAntiPatterns(sql)` (helper
+    puro exportado). Detecção **conservadora** (poucos regexes inequívocos para
+    evitar falso-positivo): `SELECT *` (danger), `OFFSET <n>` (warning),
+    `LIKE '%…'` curinga à esquerda (warning), `NOT IN (` (warning). Cada badge
+    tem `title` com a recomendação (ex.: keyset em vez de OFFSET, NOT EXISTS em
+    vez de NOT IN). Atualiza reativamente conforme o usuário edita a query.
+- **Decisões / desvios:**
+  - **100% client-side, sem backend.** A §3c é frontend-only (checkbox só pede
+    render + marcadores). Nenhuma rota/handler/prompt mudou; o `/chat` já devolve
+    `performance_notes`/`assumptions`. **Gates Go não requeridos** para 3c.
+  - **Dois sinais complementares e independentes:** (a) `classifyNote` classifica
+    o **texto livre** que o LLM escreveu (o que ele *disse* ter evitado/alertado);
+    (b) `detectQueryAntiPatterns` inspeciona o **SQL real** na tela (o que *está*
+    escrito). Um não depende do outro — a query pode ter `SELECT *` sem o LLM ter
+    comentado, e vice-versa. Por isso são componentes/helpers separados.
+  - **Regex conservador no scan de SQL** de propósito: só padrões inequívocos.
+    Deixei de fora "sem WHERE" e "vírgula-join/cartesiano" no scan do SQL (alto
+    risco de falso-positivo sem um parser real) — esses ficam a cargo do
+    `classifyNote` (texto do LLM), que é onde faz sentido. `safety.go` no backend
+    já garante SELECT-only; os marcadores são puramente informativos.
+  - **Helpers exportados e puros** (`classifyNote`, `detectQueryAntiPatterns`,
+    tipos `AntiPatternSeverity`/`QueryMarker`), seguindo o mesmo padrão da Fase 3b
+    (`extractPlanMetrics`/`deltaPct`) — prontos para teste unitário se/quando
+    houver infra de teste no frontend (ainda **não há** vitest/jest no projeto).
+  - **Paleta reusa o `Badge` existente** (variants `danger`/`warning`/`info`/
+    `muted`) — nenhuma cor/classe nova fora do `SEVERITY_ACCENT` (bordas/tints
+    Tailwind já disponíveis). Ícone `⚠` (unicode) nos marcadores, sem lib nova.
+- **Descobertas / para as próximas fases:**
+  - **Nomes reais (contrato de UI):** `classifyNote(text) → {label, severity}`,
+    `detectQueryAntiPatterns(sql) → QueryMarker[]`, componentes
+    `PerformanceNotesPanel({notes, assumptions})` e `QueryMarkers({sql})`,
+    constantes `NOTE_CATEGORIES`/`SEVERITY_VARIANT`/`SEVERITY_ACCENT` — tudo em
+    `QueryStudioPage.tsx`. Reusáveis por uma futura fase de testes de front.
+  - **Fase 3d (config ANALYZE):** independente desta; a UI ainda decide EXPLAIN
+    só por `EXPLAIN_KINDS` (dialeto). Nada aqui tocou o botão ANALYZE.
+  - Para **estender o catálogo** de anti-padrões, basta acrescentar entradas em
+    `NOTE_CATEGORIES` (mantendo a ordem mais-severo-primeiro) ou um novo `if` em
+    `detectQueryAntiPatterns` — nenhuma outra mudança é necessária.
+  - `npm run build` no PowerShell conclui com `✓ built` (aviso de chunk >500 kB é
+    cosmético/pré-existente; `2>$null` evita o `NativeCommandError` do stderr do
+    vite). O `cd frontend` falha se o diretório já for `frontend` — rodar da raiz.
+- **Testes:** `./node_modules/.bin/tsc --noEmit -p .` → OK (projeto inteiro, sem
+  erros); `npm run build` → OK (`tsc -b && vite build`, `✓ built`). Backend não
+  tocado → gates Go não requeridos para 3c.
 - **Commit:** (a cargo do orquestrador)
 

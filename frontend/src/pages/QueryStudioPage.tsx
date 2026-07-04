@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../auth";
-import { Badge } from "../components/Badge";
+import { Badge, type BadgeVariant } from "../components/Badge";
 import { EmptyState } from "../components/EmptyState";
 import { Pagination } from "../components/Pagination";
 import { CodeEditor, type SqlSchema } from "../components/CodeEditor";
@@ -729,6 +729,8 @@ export function QueryStudioPage() {
               sqlSchema={sqlSchema}
             />
 
+            <QueryMarkers sql={query} />
+
             <div className="flex items-center gap-1.5 flex-wrap">
               <button
                 type="button"
@@ -793,18 +795,7 @@ export function QueryStudioPage() {
               </div>
             )}
 
-            {performanceNotes.length > 0 && (
-              <div>
-                <div className="text-xs font-semibold text-muted-foreground mb-1">
-                  Notas de performance
-                </div>
-                <ul className="list-disc pl-5 space-y-0.5 text-sm">
-                  {performanceNotes.map((n, i) => (
-                    <li key={i}>{n}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
+            <PerformanceNotesPanel notes={performanceNotes} assumptions={assumptions} />
 
             {/* --- Plano / Preview / Comparação --- */}
             {(explainResult || previewResult || explain.error || preview.error || baselinePlan) && (
@@ -1107,6 +1098,223 @@ function SessionHistory({
           onPageSizeChange={onPageSizeChange}
         />
       </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Anti-pattern detection (Fase 3c)
+//
+// Two complementary signals are surfaced in the UI, both as pure functions so
+// they can be exercised in isolation:
+//  1. classifyNote(text): maps a free-text performance note from the LLM
+//     (performance_notes) to a known anti-pattern category with a severity and
+//     Badge variant, so the notes panel shows *what kind* of issue it is with a
+//     colour accent instead of a flat bullet list.
+//  2. detectQueryAntiPatterns(sql): a light, false-positive-averse scan of the
+//     current SQL text for a few unmistakable anti-patterns (SELECT *, OFFSET,
+//     leading-wildcard LIKE, NOT IN), shown as markers right below the editor.
+// ============================================================================
+
+export type AntiPatternSeverity = "danger" | "warning" | "info";
+
+const SEVERITY_VARIANT: Record<AntiPatternSeverity, BadgeVariant> = {
+  danger: "danger",
+  warning: "warning",
+  info: "info",
+};
+
+// Left-border accent + soft tint per severity for the note cards.
+const SEVERITY_ACCENT: Record<AntiPatternSeverity, string> = {
+  danger: "border-l-red-400 bg-red-50/50",
+  warning: "border-l-amber-400 bg-amber-50/50",
+  info: "border-l-blue-300 bg-blue-50/40",
+};
+
+// Ordered most-severe-first: the first matching category wins. Patterns accept
+// both PT (LLM output language) and EN wording, since the model may mix terms.
+const NOTE_CATEGORIES: { label: string; severity: AntiPatternSeverity; test: RegExp }[] = [
+  { label: "SELECT *", severity: "danger", test: /select\s*\*|todas as colunas|all columns/i },
+  {
+    label: "Varredura completa",
+    severity: "danger",
+    test: /full\s*scan|seq(uential)?\s*scan|table scan|varredura completa|sem\s+where|without\s+where|falta[a-z ]*where|no\s+where/i,
+  },
+  {
+    label: "Produto cartesiano",
+    severity: "danger",
+    test: /cartesian|cartesiano|cross\s*join|produto cartesiano/i,
+  },
+  {
+    label: "Função em coluna",
+    severity: "warning",
+    test: /fun[cç][aã]o[a-z ]*(coluna|indexad)|function[a-z ]*(column|index)|sargable|quebra[a-z ]*[ií]ndice|invalida[a-z ]*[ií]ndice/i,
+  },
+  {
+    label: "OFFSET alto",
+    severity: "warning",
+    test: /offset|keyset|pagina[cç][aã]o|pagination/i,
+  },
+  {
+    label: "Subconsulta correlacionada",
+    severity: "warning",
+    test: /correlacionad|correlated/i,
+  },
+  {
+    label: "IN (subquery)",
+    severity: "warning",
+    test: /in\s*\([^)]*select|prefira\s+exists|use\s+exists|em vez de\s+in|instead of\s+in/i,
+  },
+  {
+    label: "LIKE '%…'",
+    severity: "warning",
+    test: /like\s+'?%|leading\s+wildcard|curinga[a-z ]*(in[ií]cio|esquerda)/i,
+  },
+  {
+    label: "Cast implícito",
+    severity: "warning",
+    test: /cast impl[ií]cito|implicit (cast|conversion)|convers[aã]o[a-z ]*tipo|type mismatch/i,
+  },
+  {
+    label: "Índice ausente",
+    severity: "info",
+    test: /[ií]ndice[a-z ]*(ausente|faltando|inexistente|n[aã]o[a-z ]*(existe|usad))|missing index|index[a-z ]*not\s+used|no index/i,
+  },
+  {
+    label: "Ordenação custosa",
+    severity: "info",
+    test: /order by|\bsort\b|ordena[cç][aã]o|classifica[cç][aã]o/i,
+  },
+];
+
+// classifyNote assigns a performance note to an anti-pattern category. Anything
+// unrecognised falls back to a neutral "Nota" (info) so it still renders.
+export function classifyNote(text: string): { label: string; severity: AntiPatternSeverity } {
+  const t = text || "";
+  for (const c of NOTE_CATEGORIES) {
+    if (c.test.test(t)) return { label: c.label, severity: c.severity };
+  }
+  return { label: "Nota", severity: "info" };
+}
+
+export type QueryMarker = {
+  key: string;
+  label: string;
+  severity: AntiPatternSeverity;
+  detail: string;
+};
+
+// detectQueryAntiPatterns scans the SQL text for a small set of high-confidence
+// anti-patterns. Kept deliberately conservative (few, unambiguous regexes) to
+// avoid false positives that would erode trust in the markers.
+export function detectQueryAntiPatterns(sql: string): QueryMarker[] {
+  const markers: QueryMarker[] = [];
+  if (!sql || !sql.trim()) return markers;
+  if (/select\s+\*/i.test(sql)) {
+    markers.push({
+      key: "select-star",
+      label: "SELECT *",
+      severity: "danger",
+      detail: "Liste apenas as colunas necessárias em vez de SELECT *.",
+    });
+  }
+  if (/\boffset\s+\d+/i.test(sql)) {
+    markers.push({
+      key: "offset",
+      label: "OFFSET",
+      severity: "warning",
+      detail:
+        "OFFSET alto lê e descarta linhas; prefira paginação por keyset (WHERE coluna > último_valor).",
+    });
+  }
+  if (/\blike\s+'%/i.test(sql)) {
+    markers.push({
+      key: "leading-wildcard",
+      label: "LIKE '%…'",
+      severity: "warning",
+      detail: "Curinga à esquerda impede o uso de índice B-tree na coluna.",
+    });
+  }
+  if (/\bnot\s+in\s*\(/i.test(sql)) {
+    markers.push({
+      key: "not-in",
+      label: "NOT IN",
+      severity: "warning",
+      detail: "NOT IN com subconsulta/NULLs é traiçoeiro e lento; considere NOT EXISTS.",
+    });
+  }
+  return markers;
+}
+
+// QueryMarkers renders the SQL-derived anti-pattern badges just under the editor.
+function QueryMarkers({ sql }: { sql: string }) {
+  const markers = detectQueryAntiPatterns(sql);
+  if (markers.length === 0) return null;
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      <span className="text-[11px] text-muted-foreground">Detectado na query:</span>
+      {markers.map((m) => (
+        <Badge key={m.key} variant={SEVERITY_VARIANT[m.severity]} title={m.detail}>
+          ⚠ {m.label}
+        </Badge>
+      ))}
+    </div>
+  );
+}
+
+// PerformanceNotesPanel highlights the assistant's performance_notes as colour-
+// coded cards (by classified anti-pattern) and lists the assumptions below.
+function PerformanceNotesPanel({
+  notes,
+  assumptions,
+}: {
+  notes: string[];
+  assumptions: string[];
+}) {
+  if (notes.length === 0 && assumptions.length === 0) return null;
+  return (
+    <div className="space-y-3">
+      {notes.length > 0 && (
+        <div>
+          <div className="text-xs font-semibold text-muted-foreground mb-1">
+            Notas de performance <span className="font-normal">(anti-padrões destacados)</span>
+          </div>
+          <ul className="space-y-1.5">
+            {notes.map((n, i) => {
+              const { label, severity } = classifyNote(n);
+              return (
+                <li
+                  key={i}
+                  className={
+                    "flex items-start gap-2 rounded border-l-4 px-2 py-1.5 text-sm " +
+                    SEVERITY_ACCENT[severity]
+                  }
+                >
+                  <Badge variant={SEVERITY_VARIANT[severity]} className="mt-0.5 shrink-0">
+                    {label}
+                  </Badge>
+                  <span className="flex-1">{n}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+      {assumptions.length > 0 && (
+        <div>
+          <div className="text-xs font-semibold text-muted-foreground mb-1">Premissas</div>
+          <ul className="space-y-1">
+            {assumptions.map((a, i) => (
+              <li key={i} className="flex items-start gap-2 text-sm">
+                <Badge variant="muted" className="mt-0.5 shrink-0">
+                  premissa
+                </Badge>
+                <span className="flex-1">{a}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
