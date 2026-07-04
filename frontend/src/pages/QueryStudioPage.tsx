@@ -76,9 +76,11 @@ type SessionPage = {
   page_size: number;
 };
 
-// Dialects for which the backend implements the Explainer capability. Others
-// return 422 (ErrUnsupported) and the buttons are disabled.
-const EXPLAIN_KINDS = new Set(["pg", "postgres", "postgresql"]);
+// Dialects for which the backend implements a runnable Explainer capability.
+// Others (e.g. firebird → ErrUnsupported, oracle → disabled stub, mongo/rest)
+// return 422 and the buttons are disabled — the 422 stays the safe fallback if
+// this heuristic and the backend ever diverge.
+const EXPLAIN_KINDS = new Set(["pg", "postgres", "postgresql", "mysql", "mssql"]);
 
 export function QueryStudioPage() {
   const conns = useQuery({ queryKey: ["conns"], queryFn: () => api<Conn[]>("/api/connections") });

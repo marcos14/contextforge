@@ -165,6 +165,49 @@ func (d *driver) Execute(ctx context.Context, req drivers.ExecRequest) (*drivers
 	return execSQL(ctx, d.db, q, args, req)
 }
 
+// buildExplainSQL wraps a SELECT in a MySQL EXPLAIN command. With analyze=false
+// it returns the estimated plan as JSON (EXPLAIN FORMAT=JSON, does not execute);
+// with analyze=true it runs the query for real and returns the TREE-format
+// textual plan (EXPLAIN ANALYZE, MySQL 8.0.18+). Kept as a pure function so the
+// generated command can be unit-tested without a live database.
+func buildExplainSQL(query string, analyze bool) string {
+	if analyze {
+		return "EXPLAIN ANALYZE " + query
+	}
+	return "EXPLAIN FORMAT=JSON " + query
+}
+
+// ensure mysql implements the optional EXPLAIN capability.
+var _ drivers.Explainer = (*driver)(nil)
+
+// Explain implements drivers.Explainer for MySQL. It validates that the input is
+// a plain SELECT (via EnforceSelectOnly), wraps it in EXPLAIN and returns the
+// plan: JSON when analyze is false, TREE-format text when analyze is true (which
+// executes the query). The caller is responsible for imposing a short context
+// timeout, especially when analyze=true.
+func (d *driver) Explain(ctx context.Context, query string, analyze bool) (*drivers.ExplainResult, error) {
+	clean, err := drivers.EnforceSelectOnly(query)
+	if err != nil {
+		return nil, err
+	}
+	// Both EXPLAIN FORMAT=JSON and EXPLAIN ANALYZE return a single row with a
+	// single column holding the plan, so scanning into a string works.
+	var plan string
+	if err := d.db.QueryRowContext(ctx, buildExplainSQL(clean, analyze)).Scan(&plan); err != nil {
+		return nil, err
+	}
+	format := "json"
+	if analyze {
+		format = "text"
+	}
+	return &drivers.ExplainResult{
+		Dialect: string(drivers.KindMySQL),
+		Plan:    plan,
+		Format:  format,
+		Analyze: analyze,
+	}, nil
+}
+
 // execSQL is shared by SQL-based drivers (mysql, mssql, firebird).
 func execSQL(ctx context.Context, db *sql.DB, q string, args []any, req drivers.ExecRequest) (*drivers.ExecResult, error) {
 	cctx := ctx

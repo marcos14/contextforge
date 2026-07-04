@@ -26,6 +26,31 @@ func (stub) Execute(context.Context, drivers.ExecRequest) (*drivers.ExecResult, 
 	return nil, ErrNotEnabled
 }
 
+// buildExplainPlanSQL and displayPlanSQL document Oracle's EXPLAIN syntax for a
+// build compiled with -tags oracle. Oracle's EXPLAIN PLAN is a two-step
+// operation: EXPLAIN PLAN FOR <q> populates PLAN_TABLE (without running the
+// query), then a SELECT over DBMS_XPLAN.DISPLAY renders it. Kept as pure
+// functions so the command format is unit-tested even though the default build
+// ships a disabled stub.
+func buildExplainPlanSQL(query string) string {
+	return "EXPLAIN PLAN FOR " + query
+}
+
+func displayPlanSQL() string {
+	return "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY())"
+}
+
+// ensure the stub satisfies the optional EXPLAIN capability.
+var _ drivers.Explainer = stub{}
+
+// Explain satisfies drivers.Explainer. The default build ships a disabled stub
+// (New always returns ErrNotEnabled, so this is unreachable in practice); a
+// build with -tags oracle and Instant Client would implement it using
+// buildExplainPlanSQL + displayPlanSQL against a live connection.
+func (stub) Explain(context.Context, string, bool) (*drivers.ExplainResult, error) {
+	return nil, ErrNotEnabled
+}
+
 func init() {
 	drivers.Register(drivers.KindOracle, func(cfg []byte) (drivers.Driver, error) {
 		return nil, ErrNotEnabled

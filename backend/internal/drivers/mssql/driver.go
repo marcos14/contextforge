@@ -79,4 +79,100 @@ func (d *driver) Execute(ctx context.Context, req drivers.ExecRequest) (*drivers
 	return mysql.ExecSQL(ctx, d.db, q, args, req)
 }
 
+// explainSettings returns the SET statement pair used to capture the query plan.
+// With analyze=false, SHOWPLAN_XML returns the ESTIMATED plan WITHOUT executing
+// the query; with analyze=true, STATISTICS XML executes the query and returns
+// the ACTUAL plan alongside the results. Kept as a pure function so the generated
+// commands can be unit-tested without a live database.
+func explainSettings(analyze bool) (on, off string) {
+	if analyze {
+		return "SET STATISTICS XML ON", "SET STATISTICS XML OFF"
+	}
+	return "SET SHOWPLAN_XML ON", "SET SHOWPLAN_XML OFF"
+}
+
+// ensure mssql implements the optional EXPLAIN capability.
+var _ drivers.Explainer = (*driver)(nil)
+
+// Explain implements drivers.Explainer for SQL Server. It validates SELECT-only,
+// then uses SHOWPLAN_XML (estimated, no execution) or STATISTICS XML (actual,
+// executes the query) to obtain the XML execution plan. Both are session-scoped
+// SET options, so the work runs on a pinned connection that is always reset. The
+// caller must impose a short context timeout, especially when analyze=true.
+func (d *driver) Explain(ctx context.Context, query string, analyze bool) (*drivers.ExplainResult, error) {
+	clean, err := drivers.EnforceSelectOnly(query)
+	if err != nil {
+		return nil, err
+	}
+	on, off := explainSettings(analyze)
+	// SHOWPLAN/STATISTICS XML must run on the same physical connection as the
+	// query, so pin one and always reset it before returning it to the pool.
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, on); err != nil {
+		return nil, err
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), off) }()
+
+	rows, err := conn.QueryContext(ctx, clean)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	plan, err := scanShowplanXML(rows)
+	if err != nil {
+		return nil, err
+	}
+	return &drivers.ExplainResult{
+		Dialect: string(drivers.KindMSSQL),
+		Plan:    plan,
+		Format:  "xml",
+		Analyze: analyze,
+	}, nil
+}
+
+// scanShowplanXML extracts the Showplan XML from the result sets returned while
+// SHOWPLAN_XML/STATISTICS XML is on. SHOWPLAN_XML yields a single single-column
+// result set with the plan; STATISTICS XML interleaves the query's own result
+// sets with a trailing single-column plan set. Non-plan (multi-column) result
+// sets are drained, and the last single-column value wins — which is the plan.
+func scanShowplanXML(rows *sql.Rows) (string, error) {
+	var plan string
+	found := false
+	for {
+		cols, err := rows.Columns()
+		if err != nil {
+			return "", err
+		}
+		if len(cols) == 1 {
+			for rows.Next() {
+				var s sql.NullString
+				if err := rows.Scan(&s); err != nil {
+					return "", err
+				}
+				if s.Valid {
+					plan = s.String
+					found = true
+				}
+			}
+		} else {
+			for rows.Next() { // drain the actual query rows (STATISTICS XML)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return "", err
+		}
+		if !rows.NextResultSet() {
+			break
+		}
+	}
+	if !found {
+		return "", fmt.Errorf("mssql: no showplan XML returned")
+	}
+	return plan, nil
+}
+
 func init() { drivers.Register(drivers.KindMSSQL, New) }

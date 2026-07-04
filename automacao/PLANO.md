@@ -474,10 +474,10 @@ Gate extra: `integration-postgres`
 **Meta:** ampliar a cobertura de EXPLAIN aos demais dialetos suportados,
 seguindo a matriz de sintaxe da §5.3.
 
-- [ ] Implementar `Explain` em `mysql` (`EXPLAIN FORMAT=JSON`; `ANALYZE` 8.0.18+).
-- [ ] Implementar `Explain` em `mssql`, `oracle`, `firebird` conforme §5.3 (ou `ErrUnsupported` documentado quando inviável).
-- [ ] Mongo/REST permanecem `ErrUnsupported`.
-- [ ] Testes do formato do comando por dialeto.
+- [x] Implementar `Explain` em `mysql` (`EXPLAIN FORMAT=JSON`; `ANALYZE` 8.0.18+).
+- [x] Implementar `Explain` em `mssql`, `oracle`, `firebird` conforme §5.3 (ou `ErrUnsupported` documentado quando inviável).
+- [x] Mongo/REST permanecem `ErrUnsupported`.
+- [x] Testes do formato do comando por dialeto.
 
 Depende de: Fase 1b
 **Testes:** `go build ./...`, `go test ./internal/drivers/...`.
@@ -1147,6 +1147,95 @@ Formato sugerido por entrada:
 - **Testes:** `go build ./...` OK; `go vet ./internal/{api,store}/...` OK;
   `go test ./...` OK (api: +4 unit de sessões); `go test -tags=integration ./...`
   OK (novos testes de integração api/store auto-pulam sem DSN);
+  `./node_modules/.bin/tsc --noEmit -p .` OK; `npm run build` OK (`✓ built`).
+- **Commit:** (a cargo do orquestrador)
+
+### Fase 2c — `Explainer` para MySQL, MSSQL, Oracle e Firebird (2026-07-04)
+- **Feito:**
+  - **MySQL** (`internal/drivers/mysql/driver.go`): `buildExplainSQL(query,
+    analyze)` (função pura testável) → `EXPLAIN FORMAT=JSON <q>` (estimado, não
+    executa; `Format:"json"`) ou `EXPLAIN ANALYZE <q>` (8.0.18+, executa;
+    `Format:"text"`, plano em formato TREE). Método `(*driver).Explain` valida
+    via `drivers.EnforceSelectOnly` e faz `QueryRowContext(...).Scan(&plan)` —
+    ambos os EXPLAIN retornam 1 linha × 1 coluna. `var _ drivers.Explainer =
+    (*driver)(nil)`.
+  - **MSSQL** (`internal/drivers/mssql/driver.go`): `explainSettings(analyze)`
+    (pura, testável) → par `SET SHOWPLAN_XML ON/OFF` (estimado, **não executa**)
+    ou `SET STATISTICS XML ON/OFF` (real, **executa**). `(*driver).Explain`
+    valida SELECT-only, **fixa uma conexão dedicada** (`d.db.Conn(ctx)`, pois os
+    SET são de sessão), roda o `ON`, executa a query e coleta o XML via
+    `scanShowplanXML` (itera result sets: drena os multi-coluna da própria query
+    sob STATISTICS XML e captura o **último** result set de 1 coluna = o plano);
+    `defer` sempre reseta com o `OFF` (via `context.Background`, para resetar
+    mesmo se o ctx expirou) **antes** de devolver a conexão ao pool.
+    `Format:"xml"`.
+  - **Firebird** (`internal/drivers/firebird/driver.go`): `(*driver).Explain`
+    retorna **`drivers.ErrUnsupported`** (documentado): o plano do Firebird só é
+    exposto pelos comandos de cliente do isql (`SET PLAN`/`SET PLANONLY`); não há
+    statement SQL de servidor (tipo EXPLAIN) que o driver wire-protocol possa
+    emitir, e não há equivalente a EXPLAIN ANALYZE. Interface satisfeita
+    explicitamente (`var _ drivers.Explainer`) para deixar a decisão testável.
+  - **Oracle** (`internal/drivers/oracle/driver.go`): o driver é um **stub
+    desabilitado** no build padrão (`New` sempre retorna `ErrNotEnabled`), então
+    `(stub).Explain` retorna `ErrNotEnabled` (inalcançável na prática — nunca se
+    constrói um driver oracle). Adicionei os builders puros
+    `buildExplainPlanSQL(query)` (`EXPLAIN PLAN FOR <q>`) e `displayPlanSQL()`
+    (`SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY())`) **documentando**
+    a sintaxe (EXPLAIN PLAN é 2 passos no Oracle) para um build `-tags oracle`
+    futuro; são exercidos por teste.
+  - **Mongo/REST**: intocados — não implementam `Explainer`, então o helper
+    `drivers.Explain` já devolve `ErrUnsupported`.
+  - **Frontend** (`QueryStudioPage.tsx`): `EXPLAIN_KINDS` agora inclui `mysql` e
+    `mssql` (os que têm EXPLAIN executável). **Não** inclui `firebird`/`oracle`
+    (retornam ErrUnsupported/ErrNotEnabled → 422); o 422 continua sendo o
+    fallback seguro se a heurística divergir do backend.
+  - **Testes:** `mysql/driver_test.go` (formato do comando com/sem ANALYZE);
+    `mssql/driver_test.go` (par de SET por modo); `oracle/driver_test.go`
+    (builders + `Explain` → `ErrNotEnabled`); `firebird/driver_test.go`
+    (`Explain` → `ErrUnsupported` nos dois modos).
+- **Decisões / desvios:**
+  - **Padrão do pg replicado**: comando em função pura testável +
+    `EnforceSelectOnly` no início do `Explain`. A validação SELECT-only é
+    **defesa em profundidade** — o handler da Fase 1c já valida antes, mas o
+    driver revalida (mesma escolha do pg).
+  - **MSSQL usa conexão dedicada + reset garantido.** SHOWPLAN/STATISTICS XML
+    são opções de **sessão**; sem `Conn(ctx)` + `SET ... OFF` no defer, uma
+    conexão do pool ficaria "presa" em modo showplan e **não executaria** as
+    próximas queries. `scanShowplanXML` mantém o **último** valor de 1 coluna
+    justamente porque, sob STATISTICS XML, o plano vem **depois** dos result sets
+    da própria query. **Não validado contra SQL Server real** (sem instância);
+    coberto por teste de geração de comando + validação manual quando houver
+    ambiente (§2c "Observação").
+  - **Firebird = ErrUnsupported explícito** em vez de "não implementar a
+    interface": o resultado via helper é o mesmo, mas implementar deixa a decisão
+    documentada no driver e testável. A UI já cai no 422.
+  - **Oracle = stub → ErrNotEnabled.** Não há arquivo de driver Oracle real no
+    repo (só o stub; `-tags oracle` não tem fonte correspondente aqui). Os
+    builders ficam prontos e testados para quando o driver real for adicionado.
+    **ErrNotEnabled ≠ ErrUnsupported**, mas é irrelevante no build padrão porque
+    `oracle.New` falha antes de qualquer `Explain` (openDriver nunca retorna um
+    driver oracle).
+- **Descobertas / para as próximas fases:**
+  - **Capacidade de EXPLAIN por dialeto (estado atual):** `pg` (JSON, estimado +
+    ANALYZE), `mysql` (JSON estimado + ANALYZE/TREE text), `mssql` (XML, estimado
+    via SHOWPLAN + real via STATISTICS). `firebird`/`oracle`/`mongo`/`rest` →
+    sem EXPLAIN. **Fase 3b (comparação de planos):** o `plan` vem em formatos
+    heterogêneos (`Format`: json/text/xml) — a UI de diff deve tratar por
+    `format`, não assumir JSON.
+  - **`drivers.ExplainResult.Format`** agora assume 3 valores: `"json"` (pg,
+    mysql estimado), `"text"` (mysql analyze), `"xml"` (mssql). Considerar isso
+    ao renderizar o plano.
+  - **mssql `scanShowplanXML`** é um bom ponto de reuso se algum dia precisar ler
+    múltiplos result sets de um `*sql.Rows` (usa `rows.NextResultSet()`).
+  - **Sem novos testes de integração** nesta fase: MSSQL/Oracle/Firebird não têm
+    testcontainers padrão; o gate `integration-postgres` não cobre esses
+    dialetos. A validação end-to-end fica dependente de instâncias reais (§2c).
+  - Go local disponível via PowerShell (`go` no PATH); Bash tool **não** tem
+    `go`. `npm run build` no PowerShell conclui com `✓ built` (aviso de chunk é
+    cosmético/pré-existente).
+- **Testes:** `go build ./...` OK; `go vet ./internal/drivers/...` OK;
+  `go test ./...` OK (novos: mysql +1, mssql +1, oracle +2, firebird +1;
+  demais pacotes inalterados); `go build -tags=integration ./...` OK;
   `./node_modules/.bin/tsc --noEmit -p .` OK; `npm run build` OK (`✓ built`).
 - **Commit:** (a cargo do orquestrador)
 

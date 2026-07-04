@@ -86,4 +86,19 @@ func (d *driver) Execute(ctx context.Context, req drivers.ExecRequest) (*drivers
 	return mysql.ExecSQL(ctx, d.db, q, args, req)
 }
 
+// ensure firebird satisfies the optional EXPLAIN capability (reporting it as
+// unsupported — see Explain).
+var _ drivers.Explainer = (*driver)(nil)
+
+// Explain implements drivers.Explainer for Firebird. Firebird exposes the query
+// plan only through the isql client's SET PLAN / SET PLANONLY directives, which
+// are client-side commands — there is no server-side SQL statement (such as
+// EXPLAIN) that the wire-protocol driver can issue to obtain a plan, and there
+// is no EXPLAIN ANALYZE equivalent. It therefore reports ErrUnsupported so the
+// EXPLAIN action can be disabled for Firebird connections (mapped to HTTP 422 by
+// the handler).
+func (d *driver) Explain(context.Context, string, bool) (*drivers.ExplainResult, error) {
+	return nil, drivers.ErrUnsupported
+}
+
 func init() { drivers.Register(drivers.KindFirebird, New) }
