@@ -1,0 +1,38 @@
+{
+  "plano": "automacao/PLANO.md",
+  "modelo": "opus",
+  "add_dirs": null,
+  "max_budget_usd": 25,
+  "timeout_min": 120,
+  "max_correcoes": 2,
+  "max_ciclos_revisao": 1,
+  "versionar_automacao": true,
+  "gates": [
+    {
+      "nome": "backend",
+      "dir": "backend",
+      "somente_se_mudou": true,
+      "comandos": [
+        "go build ./...",
+        "go test ./..."
+      ]
+    },
+    {
+      "nome": "frontend",
+      "dir": "frontend",
+      "somente_se_mudou": true,
+      "comandos": [
+        "./node_modules/.bin/tsc --noEmit -p .",
+        "npm run build"
+      ]
+    }
+  ],
+  "gates_extra": [
+    {
+      "nome": "integration-postgres",
+      "comandos": [
+        "go test -tags=integration ./..."
+      ]
+    }
+  ]
+}
