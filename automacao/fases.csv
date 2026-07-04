@@ -6,7 +6,7 @@ fase;titulo;status;depende_de;requer_humano;gate_extra;modelo;tentativas;custo_u
 2a;Introspecção rica (IntrospectRich) Postgres + MySQL no prompt;concluida;1a+1c;nao;integration-postgres;;1;4.77;2026-07-03 23:59;ok — custo US$ 4.77
 2b;Persistência de sessões (migration + endpoints + UI histórico);concluida;1c+1d;nao;integration-postgres;;1;7.10;2026-07-04 00:11;ok — custo US$ 7.10
 2c;Explainer para MySQL, MSSQL, Oracle e Firebird;concluida;1b;nao;;;1;4.25;2026-07-04 00:20;ok — custo US$ 4.25
-3a;Botão 'Promover a Tool';concluida;1d;nao;;;1;;;"Frontend-only. Ponte para o fluxo de Tools pré-preenchendo query/explicação; reusa rotas/estado de ToolsPage."
+3a;Botão 'Promover a Tool';concluida;1d;nao;;;1;3.60;2026-07-04 00:26;ok — custo US$ 3.60
 3b;Comparação de planos (antes/depois de índice sugerido);pendente;1d+2a;nao;;;;;;"Full-stack. UI para armazenar/comparar dois ExplainResult (baseline vs proposto); suporte no handler /explain se necessário. Gate backend só se o backend mudar."
 3c;Detecção visual de anti-padrões;pendente;1d;nao;;;;;;Frontend-only. Renderização com destaque (Badge/cores) de performance_notes/assumptions e marcadores no editor/painel.
 3d;Config para habilitar/desabilitar EXPLAIN ANALYZE;pendente;1c;nao;;;;;;"Full-stack. Flag em config.go (ex.: QUERY_STUDIO_ALLOW_ANALYZE); handler /explain respeita a flag; UI oculta/desabilita botão conforme capacidade."
