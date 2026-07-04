@@ -30,6 +30,7 @@
   "gates_extra": [
     {
       "nome": "integration-postgres",
+      "dir": "backend",
       "comandos": [
         "go test -tags=integration ./..."
       ]

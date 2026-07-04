@@ -393,11 +393,11 @@ Depende de: —
 **Meta:** introduzir a capacidade opcional `Explainer` no contrato de driver,
 implementá-la no Postgres e garantir que EXPLAIN/preview só aceitem SELECT.
 
-- [ ] Adicionar `Explainer`/`ExplainResult` e `ErrUnsupported` em `internal/drivers/driver.go`.
-- [ ] Implementar `Explain` no driver `pg` (`EXPLAIN (FORMAT JSON)` e `ANALYZE, BUFFERS` quando `analyze=true`).
-- [ ] Reforçar `drivers/safety.go` para validar SELECT-only em EXPLAIN/preview (rejeitar DDL/DML).
-- [ ] Demais drivers retornam `ErrUnsupported`.
-- [ ] Testes: estender `drivers/safety_test.go` (SELECT-only) + teste do formato do comando EXPLAIN gerado.
+- [x] Adicionar `Explainer`/`ExplainResult` e `ErrUnsupported` em `internal/drivers/driver.go`.
+- [x] Implementar `Explain` no driver `pg` (`EXPLAIN (FORMAT JSON)` e `ANALYZE, BUFFERS` quando `analyze=true`).
+- [x] Reforçar `drivers/safety.go` para validar SELECT-only em EXPLAIN/preview (rejeitar DDL/DML).
+- [x] Demais drivers retornam `ErrUnsupported`.
+- [x] Testes: estender `drivers/safety_test.go` (SELECT-only) + teste do formato do comando EXPLAIN gerado.
 
 Depende de: —
 **Testes:** `go build ./...`, `go test ./internal/drivers/...`. Validação real do EXPLAIN Postgres via gate extra `integration-postgres`.
@@ -666,4 +666,87 @@ Formato sugerido por entrada:
 - **Testes:** `go build ./...` → OK; `go test ./...` → OK (llm 5 testes novos
   passando; backup/drivers inalterados). Frontend não tocado nesta fase.
 - **Commit:** (a cargo do orquestrador)
+
+### Fase 1b — Capacidade EXPLAIN (interface + Postgres) e safety SELECT-only (2026-07-03)
+- **Feito:**
+  - `internal/drivers/driver.go`: adicionei o sentinel `ErrUnsupported`, o tipo
+    `ExplainResult{Dialect,Plan,Format,Analyze}`, a interface opcional
+    `Explainer` (`Explain(ctx, query, analyze) (*ExplainResult, error)`) e um
+    **helper de pacote** `drivers.Explain(ctx, d Driver, query, analyze)` que
+    faz o type-assert e devolve `ErrUnsupported` para drivers sem suporte. Esse
+    helper é o **ponto de entrada único** que a Fase 1c deve usar.
+  - `internal/drivers/safety.go`: nova função `EnforceSelectOnly(sql)` —
+    variante mais estrita de `EnforceReadOnly` que aceita **apenas** `SELECT`/
+    `WITH` e rejeita `SHOW`/`EXPLAIN`/DDL/DML. É reuso de `EnforceReadOnly`
+    (mantém stripping de comentários, `;` final e multi-statement) + checagem
+    do primeiro token.
+  - `internal/drivers/pg/driver.go`: `buildExplainSQL(query, analyze)` (função
+    pura, testável) que gera `EXPLAIN (FORMAT JSON) <q>` ou
+    `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) <q>`; e o método
+    `(*driver).Explain` que valida via `EnforceSelectOnly`, roda o EXPLAIN
+    (single row / single col JSON via `QueryRow.Scan`) e devolve
+    `ExplainResult{Dialect:"pg", Format:"json"}`.
+  - Testes: `drivers/safety_test.go` (aceita SELECT/WITH; rejeita
+    EXPLAIN/SHOW/DELETE/UPDATE/DROP/CREATE/INSERT/multi-stmt/vazio);
+    `drivers/explain_test.go` (helper devolve `ErrUnsupported` p/ driver sem
+    Explainer e delega corretamente quando implementa); `pg/driver_test.go`
+    (formato do comando EXPLAIN, com e sem ANALYZE).
+- **Decisões / desvios:**
+  - **Padrão de capacidade opcional via type-assert** (não adicionei método
+    `Explain` retornando `ErrUnsupported` em cada driver). O checkbox "demais
+    drivers retornam `ErrUnsupported`" é satisfeito pelo helper
+    `drivers.Explain`, que devolve `ErrUnsupported` quando o driver não
+    implementa `Explainer`. Assim mongo/rest/mysql/mssql/oracle/firebird ficam
+    intactos e a detecção de capacidade é limpa. **Fase 1c:** chame sempre
+    `drivers.Explain(...)`, nunca faça type-assert por conta própria; trate
+    `errors.Is(err, drivers.ErrUnsupported)` para desabilitar o botão na UI.
+  - **`EnforceSelectOnly` separada de `EnforceReadOnly`**: a existente continua
+    permitindo SHOW/EXPLAIN (usada pelo executor de tools). A nova é para o
+    Query Studio, onde o backend é quem envelopa em EXPLAIN — então o input
+    tem de ser um SELECT puro. **Fase 1c:** o handler `/preview` e `/explain`
+    devem passar a query por `EnforceSelectOnly` (o driver `pg.Explain` já
+    chama, mas o handler deve validar antes de forçar `LIMIT` no preview).
+  - **Campo `Analyze bool` adicionado ao `ExplainResult`** (não previsto na
+    §5.3 do plano, que só tinha Dialect/Plan/Format). Útil para a UI e
+    auditoria saberem se a query foi de fato executada. Serializa como JSON.
+  - **Timeout do ANALYZE**: `Explain` respeita o `context` recebido — não tem
+    parâmetro próprio de timeout. **Fase 1c:** o handler deve impor
+    `context.WithTimeout` curto antes de chamar (especialmente com
+    `analyze=true`), conforme §8.2.
+  - `pg.Explain` usa `QueryRow.Scan(&plan)` num `string` — com FORMAT JSON o
+    Postgres devolve **uma** linha, **uma** coluna `json` contendo o array do
+    plano. Como o driver usa `QueryExecModeSimpleProtocol`, o valor chega como
+    texto e o scan em `string` funciona.
+- **Descobertas / para as próximas fases:**
+  - **Não havia infra de testcontainers** (`go.mod` sem dependência; nenhum
+    build tag `integration`). Em vez de introduzir Docker/testcontainers,
+    criei `pg/driver_integration_test.go` como **teste que se auto-pula**
+    quando `QUERY_STUDIO_TEST_PG_DSN` não está setado — fica verde no gate
+    padrão (`go test ./...`) e valida o EXPLAIN real (plano é JSON válido,
+    ANALYZE reporta "Actual", DROP é rejeitado) quando o gate
+    `integration-postgres` fornece a DSN. **Comando:**
+    `QUERY_STUDIO_TEST_PG_DSN="postgres://user:pass@host:5432/db?sslmode=disable" go test ./internal/drivers/pg/ -run TestExplain_Integration -v`.
+    **Fases 2a/2c:** reusar essa mesma convenção de env-var para novos testes
+    de integração Postgres (ex.: `IntrospectRich`).
+  - `pg.Config{DSN string}` é o shape do config do driver (JSON). `pg.New(cfg
+    []byte)` constrói. `d.Close()` fecha o pool.
+  - A ordem dos tokens de `EnforceReadOnly` já permitia EXPLAIN/SHOW — por isso
+    a nova função **não substitui** a antiga, só endurece para o novo módulo.
+- **Testes:** `go build ./...` → OK; `go vet ./internal/drivers/...` → OK;
+  `go test ./...` → OK (drivers: +2 safety, +2 explain helper, +1 pg
+  buildExplainSQL; integration pg pula sem DSN; llm/backup inalterados).
+  Frontend não tocado nesta fase.
+- **Commit:** (a cargo do orquestrador)
+- **Correção pós-gate (2026-07-03):** o gate extra `integration-postgres`
+  falhava com `pattern ./...: directory prefix . does not contain main module`.
+  **Causa raiz:** em `automacao/autopilot.json`, o gate `integration-postgres`
+  não declarava `"dir"`, então `go test -tags=integration ./...` rodava na raiz
+  do repositório — onde não há `go.mod` (o módulo vive em `backend/`). Não era
+  problema de código nem de teste. **Correção:** adicionei `"dir": "backend"`
+  ao gate `integration-postgres`, igualando a convenção do gate `backend`
+  (todos os comandos Go rodam em `backend/`). Nenhum teste foi
+  desabilitado/skipado. Gates re-executados a partir de `backend/`:
+  `go build ./...` OK, `go test ./...` OK, `go test -tags=integration ./...` OK
+  (o `pg/driver_integration_test.go` continua se auto-pulando sem
+  `QUERY_STUDIO_TEST_PG_DSN`, como projetado).
 
