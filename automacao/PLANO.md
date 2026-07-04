@@ -409,12 +409,12 @@ Gate extra: `integration-postgres`
 **Meta:** expor `/chat`, `/explain` e `/preview` no grupo admin+editor,
 costurando 1a (LLM) e 1b (Explainer/safety), com `LIMIT` forçado no preview.
 
-- [ ] Criar `internal/api/handlers_query_studio.go` (`QueryStudioChat`, `QueryStudioExplain`, `QueryStudioPreview`).
-- [ ] Reusar `writeJSON`/`writeErr`/`decodeBody`/`currentUser`/`openDriver`.
-- [ ] Preview com `LIMIT` **imposto pelo servidor** (ex.: 100) + timeout curto; ignorar limite do LLM.
-- [ ] EXPLAIN ANALYZE exige flag `analyze:true` + auditoria em `audit_logs`.
-- [ ] Registrar as rotas em `handlers_llm_router.go::Mount` sob `RequireAuth("admin","editor")`.
-- [ ] Teste de handler (SELECT-only enforcement + LIMIT forçado; mockar driver/LLM).
+- [x] Criar `internal/api/handlers_query_studio.go` (`QueryStudioChat`, `QueryStudioExplain`, `QueryStudioPreview`).
+- [x] Reusar `writeJSON`/`writeErr`/`decodeBody`/`currentUser`/`openDriver`.
+- [x] Preview com `LIMIT` **imposto pelo servidor** (ex.: 100) + timeout curto; ignorar limite do LLM.
+- [x] EXPLAIN ANALYZE exige flag `analyze:true` + auditoria em `audit_logs`.
+- [x] Registrar as rotas em `handlers_llm_router.go::Mount` sob `RequireAuth("admin","editor")`.
+- [x] Teste de handler (SELECT-only enforcement + LIMIT forçado; mockar driver/LLM).
 
 Depende de: Fase 1a, Fase 1b
 **Testes:** `go build ./...`, `go test ./internal/api/...` (auth, SELECT-only, LIMIT forçado, flag analyze).
@@ -802,5 +802,93 @@ Formato sugerido por entrada:
 - **Testes:** `go build ./...` OK; `go vet ./internal/drivers/...` OK;
   `go test ./...` OK; `go test -tags=integration ./...` OK (integração pg
   auto-pula sem DSN). Frontend não tocado (gate `somente_se_mudou` não roda).
+- **Commit:** (a cargo do orquestrador)
+
+### Fase 1c — Handlers `/query-studio/*` + registro de rotas (2026-07-03)
+- **Feito:**
+  - Novo `backend/internal/api/handlers_query_studio.go` com os três handlers:
+    - `QueryStudioChat` — costura a Fase 1a. Decodifica `{connection_id,
+      tables, messages, current_query, explain_result}`, exige `messages`,
+      exige `a.LLM != nil` (503 se não configurado), resolve `kind` via
+      `SELECT type FROM connections` (só quando `connection_id != uuid.Nil`) e
+      chama `a.LLM.QueryStudioChat(...)`. Só envia **metadados de schema +
+      plano EXPLAIN** ao LLM (nunca linhas) — as linhas do preview ficam no
+      cliente (§8.7).
+    - `QueryStudioExplain` — costura a Fase 1b. Valida `drivers.EnforceSelectOnly`
+      **antes** de qualquer acesso a DB (400 em não-SELECT), exige
+      `connection_id`, abre driver via `a.openDriver`, impõe
+      `context.WithTimeout` (10s normal / 30s quando `analyze=true`, §8.2) e
+      chama o **helper único** `drivers.Explain(ctx, drv, clean, analyze)`.
+      `errors.Is(err, drivers.ErrUnsupported)` → **422** (UI desabilita o botão).
+      `analyze=true` executa a query de verdade → grava em `audit_logs` via
+      `a.audit(r, "query_studio.explain_analyze", connID, {dialect})`.
+    - `QueryStudioPreview` — valida `EnforceSelectOnly` (400), exige
+      `connection_id`, **impõe `LIMIT` no servidor** via `clampPreviewLimit`
+      (máx 100, ignora o limite do LLM), timeout curto (15s) e chama
+      `drv.Execute(...)` com `RowLimit`/`Timeout` forçados.
+  - Rotas registradas em `handlers_llm_router.go::Mount`, no grupo
+    `RequireAuth("admin","editor")`, logo após os `/llm/*`:
+    `POST /query-studio/chat|explain|preview`.
+  - Testes de handler em `handlers_query_studio_test.go` (novo — 1º teste do
+    pacote `api`): `clampPreviewLimit` (LIMIT forçado), rejeição SELECT-only em
+    preview e explain (DELETE/UPDATE/DROP/INSERT/TRUNCATE/**EXPLAIN cru**/**SHOW**/
+    multi-statement/vazio → 400), SELECT válido passa o parser e para no guard
+    de `connection_id`, `chat` exige messages (400) e exige LLM (503).
+- **Decisões / desvios:**
+  - **Handlers testáveis sem DB/LLM reais.** Como o pacote `api` não tinha
+    infra de teste e `LLM`/`openDriver` são concretos (dependem de
+    Pool+Cipher), estruturei os handlers para **validar query e campos
+    obrigatórios ANTES de tocar em DB/driver/LLM**. Assim os testes rodam com um
+    `&API{}` zero-value: os caminhos de validação (SELECT-only, connection_id
+    ausente, messages ausentes, LLM nil) nunca chegam ao Pool. Não introduzi
+    interfaces/mocks nem mexi em `api.go` — evita tocar em superfícies de outras
+    fases. **Para a Fase 1d/2b:** o caminho "SELECT válido + connection real"
+    (que chama `openDriver`/`Execute`/`Explain`) fica coberto pelo gate
+    `integration-postgres` quando houver DSN — hoje não há mock de Pool.
+  - **`clampPreviewLimit` como função pura** (const `queryStudioPreviewMaxRows =
+    100`): retorna 100 para `<=0` **ou** `>100`; honra 1..100. É o ponto único
+    de "LIMIT imposto pelo servidor". O campo `row_limit` do request é opcional
+    (`omitempty`) e nunca confia no LIMIT que o LLM colocou na query.
+  - **Timeouts como constantes no handler** (`queryStudioExplainTimeout=10s`,
+    `queryStudioAnalyzeTimeout=30s`, `queryStudioPreviewTimeout=15s`) — a Fase
+    1b deixou explícito que o `pg.Explain` respeita o `context` mas **não** impõe
+    timeout próprio; o handler é quem aplica (§8.2). ANALYZE ganha janela maior
+    porque executa a query, mas ainda bounded.
+  - **422 (Unprocessable Entity) para `ErrUnsupported`** no `/explain` (não 501):
+    mantém coerência com o resto do módulo (preview usa 422 para erro de
+    execução) e a mensagem "explain not supported for this connection" permite à
+    UI desabilitar o botão. **Fase 1d:** tratar 422 nesse endpoint como
+    "capacidade ausente".
+  - **Contrato de request** (nomes JSON reais para a Fase 1d): chat →
+    `{connection_id, tables, messages, current_query, explain_result}`;
+    explain → `{connection_id, query, analyze}`; preview →
+    `{connection_id, query, row_limit?}`. `messages` usa `llm.Message`
+    (`{role, content}`); `tables` usa `drivers.Table`. A resposta do `/chat` é o
+    `*llm.QueryStudioOutput` (campos `reply`, `query`, `explanation`,
+    `suggested_indexes`, `performance_notes`, `assumptions`; `Raw` tem tag `-`,
+    não sai no JSON). `/explain` responde `drivers.ExplainResult`
+    (`{dialect, plan, format, analyze}`); `/preview` responde
+    `drivers.ExecResult` (`{columns, rows, count}`).
+- **Descobertas / para as próximas fases:**
+  - `a.openDriver(r, id)` (em `handlers_connections.go`) é o jeito canônico de
+    abrir um driver ad-hoc (decripta config com AAD `connection:<id>`); o caller
+    **deve** `defer drv.Close()`. Reusei-o nos dois handlers de execução.
+  - `a.audit(r, action, target, details)` (em `handlers_backup.go`) já
+    swallow-a erros e usa `currentUser(ctx)` para o actor — basta chamar. A
+    ação nova é `"query_studio.explain_analyze"`.
+  - Padrão do `ChatTool`: só resolve `kind` da conexão quando `connection_id !=
+    uuid.Nil`; reaproveitei essa lógica no `QueryStudioChat` (permite conversa
+    puramente conceitual sem conexão selecionada).
+  - **Sem mock de `*pgxpool.Pool`** no repo: qualquer teste que precise exercer
+    o caminho pós-validação (Execute/Explain reais) depende do gate
+    `integration-postgres`. Se a Fase 2b/3d quiser testar handlers de DB de
+    verdade sem Postgres, terá que introduzir uma interface sobre o Pool (não
+    feito aqui para não ampliar escopo).
+  - Go local disponível via PowerShell (`go` no PATH); o Bash tool **não** tem
+    `go`. Frontend intocado nesta fase → gates `tsc`/`build` não rodam.
+- **Testes:** `go build ./...` OK; `go vet ./internal/api/...` OK;
+  `go test ./...` OK (pacote `api` agora com 7 testes novos, todos passando;
+  demais pacotes inalterados); `go test -tags=integration ./...` OK (pg
+  auto-pula sem DSN).
 - **Commit:** (a cargo do orquestrador)
 

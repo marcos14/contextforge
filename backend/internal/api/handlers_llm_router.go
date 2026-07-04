@@ -242,6 +242,10 @@ func (a *API) Mount(r chi.Router) {
 		r.Post("/llm/document-tool", a.DocumentTool)
 		r.Post("/llm/chat-tool", a.ChatTool)
 
+		r.Post("/query-studio/chat", a.QueryStudioChat)
+		r.Post("/query-studio/explain", a.QueryStudioExplain)
+		r.Post("/query-studio/preview", a.QueryStudioPreview)
+
 		r.Post("/backup/export", a.BackupExport)
 		r.Post("/backup/preview", a.BackupPreview)
 		r.Post("/backup/restore", a.BackupRestore)
