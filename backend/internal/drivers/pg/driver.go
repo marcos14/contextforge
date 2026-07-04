@@ -138,6 +138,42 @@ func (d *driver) Execute(ctx context.Context, req drivers.ExecRequest) (*drivers
 	return res, rows.Err()
 }
 
+// buildExplainSQL wraps a SELECT query in a Postgres EXPLAIN command. With
+// analyze=false it produces the safe, non-executing estimated plan; with
+// analyze=true it runs the query for real and includes buffer statistics.
+// Kept as a pure function so the generated command can be unit-tested without a
+// live database.
+func buildExplainSQL(query string, analyze bool) string {
+	if analyze {
+		return "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + query
+	}
+	return "EXPLAIN (FORMAT JSON) " + query
+}
+
+// Explain implements drivers.Explainer for PostgreSQL. It validates that the
+// input is a plain SELECT (via EnforceSelectOnly), wraps it in EXPLAIN and
+// returns the JSON plan. The caller is responsible for imposing a short
+// context timeout, especially when analyze=true (which executes the query).
+func (d *driver) Explain(ctx context.Context, query string, analyze bool) (*drivers.ExplainResult, error) {
+	clean, err := drivers.EnforceSelectOnly(query)
+	if err != nil {
+		return nil, err
+	}
+	// EXPLAIN (FORMAT JSON) returns a single row with a single json column
+	// holding the plan array. The simple query protocol delivers it as text,
+	// so scanning into a string works.
+	var plan string
+	if err := d.pool.QueryRow(ctx, buildExplainSQL(clean, analyze)).Scan(&plan); err != nil {
+		return nil, err
+	}
+	return &drivers.ExplainResult{
+		Dialect: string(drivers.KindPg),
+		Plan:    plan,
+		Format:  "json",
+		Analyze: analyze,
+	}, nil
+}
+
 func init() {
 	drivers.Register(drivers.KindPg, New)
 }

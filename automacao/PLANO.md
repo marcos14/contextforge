@@ -750,3 +750,57 @@ Formato sugerido por entrada:
   (o `pg/driver_integration_test.go` continua se auto-pulando sem
   `QUERY_STUDIO_TEST_PG_DSN`, como projetado).
 
+### Fase 1b — Re-execução (código reimplementado) (2026-07-03)
+- **Contexto / por que reabriu:** o commit anterior `bf6ad64`
+  ("chore(praxis): estado apos Fase 1b [falhou]") **só continha edições de
+  automação** (`PLANO.md`, `autopilot.json`, `fases.csv`) — `git show --stat`
+  confirma que **nenhum arquivo `.go` foi commitado**. O código descrito na
+  entrada anterior (Explainer/ExplainResult/EnforceSelectOnly/pg.Explain +
+  testes) **tinha sido perdido/revertido** e não existia na árvore. O gate
+  vermelho registrado no log era, na verdade, o problema de `dir` do gate
+  `integration-postgres`, já corrigido em `autopilot.json` (`"dir": "backend"`
+  presente). Esta execução **reimplementou o código do zero**, fiel à entrada
+  anterior, e confirmou todos os gates verdes.
+- **Feito (reimplementado, idêntico ao especificado):**
+  - `internal/drivers/driver.go`: `ErrUnsupported` (sentinel), tipo
+    `ExplainResult{Dialect,Plan,Format,Analyze}`, interface opcional
+    `Explainer` e o helper de pacote `drivers.Explain(ctx, d, query, analyze)`
+    (type-assert → `ErrUnsupported` quando o driver não implementa). **Ponto de
+    entrada único** para a Fase 1c.
+  - `internal/drivers/safety.go`: `EnforceSelectOnly(sql)` — reusa
+    `EnforceReadOnly` e depois exige primeiro token `SELECT`/`WITH` (rejeita
+    `SHOW`/`EXPLAIN`/DDL/DML). É a validação para o Query Studio (o backend é
+    quem envelopa em EXPLAIN).
+  - `internal/drivers/pg/driver.go`: `buildExplainSQL(query, analyze)` (função
+    pura testável) → `EXPLAIN (FORMAT JSON) <q>` ou
+    `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) <q>`; método `(*driver).Explain`
+    que valida via `EnforceSelectOnly`, roda o EXPLAIN e devolve
+    `ExplainResult{Dialect:"pg", Format:"json"}`.
+  - Testes: `safety_test.go` (+2: aceita SELECT/WITH; rejeita
+    EXPLAIN/SHOW/DELETE/UPDATE/DROP/CREATE/INSERT/multi-stmt/vazio);
+    `drivers/explain_test.go` (novo: helper devolve `ErrUnsupported` p/ driver
+    sem Explainer via `errors.Is`, e delega corretamente quando implementa —
+    usa driver-stub `baseDriver`/`explainDriver`);
+    `pg/driver_test.go` (novo: formato do comando EXPLAIN com/sem ANALYZE);
+    `pg/driver_integration_test.go` (novo, build tag `//go:build integration`,
+    auto-pula sem `QUERY_STUDIO_TEST_PG_DSN`).
+- **Decisões / desvios:** mantidas as mesmas da entrada anterior (capacidade
+  opcional via type-assert; `EnforceSelectOnly` separada de `EnforceReadOnly`;
+  campo `Analyze bool` no `ExplainResult`; timeout do ANALYZE é
+  responsabilidade da Fase 1c via `context.WithTimeout`). **Nenhum teste
+  existente removido/desabilitado.**
+- **Descobertas / para as próximas fases:**
+  - **Gate `integration-postgres` já corrigido:** em `automacao/autopilot.json`
+    o gate tem `"dir": "backend"`. `go test -tags=integration ./...` roda a
+    partir de `backend/` e passa (o teste de integração pg auto-pula).
+  - **Lição para o orquestrador:** o estado "[falhou]" commitou apenas a
+    documentação, sem o código — cuidado ao confiar só no Registro anterior;
+    verifique a árvore (`git show --stat`) antes de assumir que uma fase está
+    implementada.
+  - Go local disponível via PowerShell (`go1.26.4`); o Bash tool **não** tem
+    `go` no PATH — use PowerShell para comandos Go nesta máquina.
+- **Testes:** `go build ./...` OK; `go vet ./internal/drivers/...` OK;
+  `go test ./...` OK; `go test -tags=integration ./...` OK (integração pg
+  auto-pula sem DSN). Frontend não tocado (gate `somente_se_mudou` não roda).
+- **Commit:** (a cargo do orquestrador)
+

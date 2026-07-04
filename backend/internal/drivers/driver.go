@@ -6,8 +6,15 @@ package drivers
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrUnsupported is returned by capability helpers when a driver does not
+// implement an optional capability (e.g. EXPLAIN). Callers should use
+// errors.Is(err, ErrUnsupported) to detect it and degrade gracefully (for
+// example, disabling the EXPLAIN button in the UI).
+var ErrUnsupported = errors.New("capability not supported by driver")
 
 // Kind identifies a driver implementation.
 type Kind string
@@ -58,6 +65,36 @@ type Driver interface {
 	Introspect(ctx context.Context) ([]Table, error)
 	Execute(ctx context.Context, req ExecRequest) (*ExecResult, error)
 	Close() error
+}
+
+// ExplainResult is the normalised output of an EXPLAIN operation.
+type ExplainResult struct {
+	Dialect string `json:"dialect"` // driver kind ("pg", "mysql", ...)
+	Plan    string `json:"plan"`    // plan text (or serialised JSON)
+	Format  string `json:"format"`  // "text" | "json"
+	Analyze bool   `json:"analyze"` // true when the query was actually executed (ANALYZE)
+}
+
+// Explainer is an optional capability: drivers that can produce a query
+// execution plan implement it. Drivers without support simply do not implement
+// the interface; use the package-level Explain helper to invoke it safely.
+//
+// When analyze is true the query is executed for real (EXPLAIN ANALYZE);
+// callers must guard this with an explicit opt-in and a short timeout.
+type Explainer interface {
+	Explain(ctx context.Context, query string, analyze bool) (*ExplainResult, error)
+}
+
+// Explain is the single entry point for the EXPLAIN capability. It type-asserts
+// the driver to Explainer and delegates, returning ErrUnsupported when the
+// driver does not implement the capability. Callers should always go through
+// this helper instead of asserting Explainer themselves.
+func Explain(ctx context.Context, d Driver, query string, analyze bool) (*ExplainResult, error) {
+	ex, ok := d.(Explainer)
+	if !ok {
+		return nil, ErrUnsupported
+	}
+	return ex.Explain(ctx, query, analyze)
 }
 
 // Factory builds a driver from its decrypted JSON config.

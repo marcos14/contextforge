@@ -39,6 +39,44 @@ func TestEnforceReadOnly_RejectsDestructive(t *testing.T) {
 	}
 }
 
+func TestEnforceSelectOnly_AcceptsSelectAndWith(t *testing.T) {
+	for _, q := range []string{
+		"SELECT id FROM users",
+		"select 1",
+		"WITH t AS (SELECT 1) SELECT * FROM t",
+		"SELECT id FROM users;",
+	} {
+		clean, err := EnforceSelectOnly(q)
+		if err != nil {
+			t.Fatalf("EnforceSelectOnly(%q) unexpected error: %v", q, err)
+		}
+		if clean == "" {
+			t.Fatalf("EnforceSelectOnly(%q) returned empty", q)
+		}
+	}
+}
+
+func TestEnforceSelectOnly_RejectsNonSelect(t *testing.T) {
+	// Unlike EnforceReadOnly, SHOW and EXPLAIN are also rejected here: the
+	// Query Studio backend is the one that wraps the query in EXPLAIN.
+	for _, q := range []string{
+		"EXPLAIN SELECT 1",
+		"SHOW TABLES",
+		"DELETE FROM t",
+		"UPDATE t SET x = 1",
+		"DROP TABLE t",
+		"CREATE TABLE t (id int)",
+		"INSERT INTO t VALUES (1)",
+		"SELECT 1; SELECT 2",
+		"",
+		"   ",
+	} {
+		if _, err := EnforceSelectOnly(q); err == nil {
+			t.Fatalf("EnforceSelectOnly(%q) expected rejection, got nil", q)
+		}
+	}
+}
+
 func TestRenderNamed_QMarkDialect_DuplicatesArgsPerOccurrence(t *testing.T) {
 	// Regression: Firebird/MySQL use anonymous `?` placeholders that do not
 	// support positional reuse. Each occurrence of :id must produce its own

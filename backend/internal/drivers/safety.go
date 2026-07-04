@@ -65,6 +65,28 @@ func EnforceReadOnly(sql string) (string, error) {
 	return clean, nil
 }
 
+// EnforceSelectOnly is a stricter variant of EnforceReadOnly used by the Query
+// Studio module. It accepts ONLY plain SELECT/WITH queries and rejects
+// everything else — including SHOW and EXPLAIN — because in that module the
+// backend is the one that wraps the query in EXPLAIN. Allowing a raw EXPLAIN or
+// SHOW from the caller would defeat that contract and could smuggle in
+// DDL/DML behind an EXPLAIN wrapper on some dialects.
+//
+// It reuses EnforceReadOnly for comment stripping, trailing ";" removal and
+// multi-statement / destructive-keyword rejection, then requires the first
+// token to be SELECT or WITH. Returns the sanitized SQL when safe.
+func EnforceSelectOnly(sql string) (string, error) {
+	clean, err := EnforceReadOnly(sql)
+	if err != nil {
+		return "", err
+	}
+	first := strings.Fields(strings.ToUpper(clean))[0]
+	if first != "SELECT" && first != "WITH" {
+		return "", fmt.Errorf("only SELECT/WITH queries are allowed, got %q", first)
+	}
+	return clean, nil
+}
+
 // namedParamRe matches :ident placeholders, ignoring ::cast tokens and
 // occurrences inside single-quoted strings (handled by the caller via
 // SplitQuoted).
