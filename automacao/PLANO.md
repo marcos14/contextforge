@@ -379,10 +379,10 @@ integração com testcontainers (ver §11 e a lista de gates do autopilot).
 (dialeto-aware, foco em performance, saída JSON), com método público no
 `llm.Client` análogo a `ChatTool`, sem tocar em rotas/UI.
 
-- [ ] Definir `QueryStudioInput`/`QueryStudioOutput` em `internal/llm/prompts.go`.
-- [ ] Escrever o system prompt (regras de performance + guias por dialeto da §5.2).
-- [ ] Implementar `func (c *Client) QueryStudioChat(ctx, QueryStudioInput) (QueryStudioOutput, error)` (usar `response_format: json_object`).
-- [ ] Teste unitário de parse da saída JSON (padrão dos testes atuais de `llm`).
+- [x] Definir `QueryStudioInput`/`QueryStudioOutput` em `internal/llm/prompts.go`.
+- [x] Escrever o system prompt (regras de performance + guias por dialeto da §5.2).
+- [x] Implementar `func (c *Client) QueryStudioChat(ctx, QueryStudioInput) (QueryStudioOutput, error)` (usar `response_format: json_object`).
+- [x] Teste unitário de parse da saída JSON (padrão dos testes atuais de `llm`).
 
 Depende de: —
 **Testes:** `go build ./...`, `go test ./internal/llm/...` (parse do JSON de saída, campos preenchidos, resiliência a JSON malformado).
@@ -620,4 +620,50 @@ Formato sugerido por entrada:
 ```
 
 <!-- As entradas do autopilot começam abaixo desta linha. -->
+
+### Fase 1a — Prompt + método LLM `QueryStudioChat` (2026-07-03)
+- **Feito:**
+  - Em `backend/internal/llm/prompts.go`, adicionei os tipos `QueryStudioInput`
+    e `QueryStudioOutput`, o system prompt `queryStudioSystem` (engenheiro de
+    banco sênior, foco em performance, SELECT-only, saída JSON estrita), o
+    helper `queryStudioDialectGuidance` (guias por dialeto: pg/mysql/mssql/
+    oracle/firebird) e o método público `func (c *Client) QueryStudioChat(ctx,
+    QueryStudioInput) (*QueryStudioOutput, error)` — análogo a `ChatTool`,
+    usando `c.Chat(ctx, msgs, true)` (que já seta `response_format: json_object`).
+  - Extraí `parseQueryStudioOutput(raw string)` para permitir teste de parse
+    sem LLM ao vivo (valida JSON, exige `reply` não-vazio, preenche `Raw`).
+  - Novo arquivo de testes `backend/internal/llm/query_studio_test.go`
+    (proposta completa, reply-only, JSON malformado, reply vazio rejeitado,
+    guias de dialeto).
+- **Decisões / desvios:**
+  - **Omiti os campos `Relations []Relation` / `Indexes []IndexInfo`** que a §5.2
+    do plano mostra no `QueryStudioInput`. Motivo: os tipos `Relation`/
+    `IndexInfo`/`SchemaGraph`/`RichIntrospector` só são criados na **Fase 2a**
+    (introspecção rica). Mantive a Fase 1a autocontida (compila sem depender de
+    Fase 2). **Para a Fase 2a:** estender `QueryStudioInput` com esses campos e
+    renderizá-los no prompt (o system prompt já orienta a evitar sugerir índices
+    já existentes — basta alimentar os dados).
+  - O prompt já contém o gancho do **loop de refino**: o campo `ExplainResult`
+    é injetado como contexto ("Last execution plan (EXPLAIN) — use it to
+    optimise"), truncado em 8000 chars. A Fase 1c/1d só precisam popular esse
+    campo com o retorno do `/explain`.
+  - `QueryStudioOutput` usa `omitempty` em todos os campos exceto `reply`; a UI
+    (Fase 1d) deve tratar `query`/`explanation` vazios como "ainda coletando
+    requisito" (turno conversacional puro).
+- **Descobertas / para as próximas fases:**
+  - `llm.Client.Chat(ctx, msgs, true)` já aplica `response_format:json_object`
+    e `Temperature: 0.1` (ver `openrouter.go`). Não precisa de novo método no
+    client HTTP.
+  - Helpers reutilizáveis já existentes em `prompts.go`: `formatTableForPrompt`
+    (omite schema sintético p/ firebird), `nullableTag`, `truncate`. Reusei
+    todos. **Não havia** arquivo de teste em `internal/llm` antes desta fase —
+    este é o primeiro (`query_studio_test.go`).
+  - `drivers.Table{Schema, Name, Columns []Column{Name,Type,Nullable}}` é o
+    shape do schema (em `drivers/driver.go`). O `ConnectionKind` esperado para
+    Postgres é `"pg"` (a guidance também aceita "postgres"/"postgresql").
+  - Sem chamadas de rede nos testes (parse puro) → roda no gate padrão sem
+    OPENROUTER_API_KEY.
+- **Testes:** `go build ./...` → OK; `go test ./...` → OK (llm 5 testes novos
+  passando; backup/drivers inalterados). Frontend não tocado nesta fase.
+- **Commit:** (a cargo do orquestrador)
 

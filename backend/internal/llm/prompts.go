@@ -328,6 +328,170 @@ func (c *Client) ChatTool(ctx context.Context, in ChatToolInput) (*ChatToolOutpu
 	return out, nil
 }
 
+// ============== Query Studio (SQL-for-general-use assistant) ==============
+
+// QueryStudioInput is the input to QueryStudioChat: a multi-turn conversation
+// where the user describes the query they need for use in ANY external system
+// (reports, ETL, dashboards, app code) — NOT an MCP tool. The assistant's job
+// is to understand the need and propose performant, idiomatic SQL for the
+// connection's dialect.
+//
+// Only fields available in Fase 1 are declared here. Rich schema data (FK
+// relations + existing indexes) is added by Fase 2a via a RichIntrospector;
+// this struct will gain Relations/Indexes fields then.
+type QueryStudioInput struct {
+	ConnectionKind string          // "pg" | "mysql" | "mssql" | "oracle" | "firebird" | ...
+	Tables         []drivers.Table // schema from Introspect
+	History        []Message       // conversation so far (user/assistant turns)
+	CurrentQuery   string          // query currently in the editor, if any
+	ExplainResult  string          // execution plan of the last validation (refine loop)
+}
+
+// QueryStudioOutput is a structured assistant turn. Reply is always present and
+// shown in the chat. When the assistant proposes a query, Query/Explanation and
+// the performance fields are populated so the UI can render them.
+type QueryStudioOutput struct {
+	Reply            string   `json:"reply"`
+	Query            string   `json:"query,omitempty"`             // SQL for the dialect (SELECT-only)
+	Explanation      string   `json:"explanation,omitempty"`       // what the query does, in the user's language
+	SuggestedIndexes []string `json:"suggested_indexes,omitempty"` // DDL of indexes that would speed the query (TEXT, never executed)
+	PerformanceNotes []string `json:"performance_notes,omitempty"` // anti-patterns avoided, warnings
+	Assumptions      []string `json:"assumptions,omitempty"`       // assumptions made about the schema
+	Raw              string   `json:"-"`                           // raw model response (debug)
+}
+
+const queryStudioSystem = `You are a senior database engineer specialised in query PERFORMANCE. You
+converse with the user in their language (default: Portuguese) to understand
+which query they need, then propose performant, idiomatic SQL for the target
+dialect. The query is for use in ANY external system (reports, ETL, dashboards,
+application code) — it is NOT an MCP tool, so do NOT ask for or produce a slug,
+params_schema, output_schema, or tool metadata.
+
+Behaviour:
+- Ask short, targeted follow-up questions when the request is ambiguous.
+- The user speaks in business terms ("faturamento por cliente no último
+  trimestre"); translate that into SQL. Do not require the user to know SQL.
+- Only use tables/columns provided in the system context. If something is
+  missing, ask the user instead of guessing; record any guess in "assumptions".
+- The "query" field MUST contain EXACTLY ONE statement. Do not include a
+  trailing semicolon. Never emit two statements separated by ";".
+- SELECT-only. Never propose INSERT/UPDATE/DELETE/DDL as the query. Suggested
+  indexes are TEXT for the user to apply manually — they are placed in
+  "suggested_indexes", never in "query".
+
+Performance rules to APPLY and EXPLAIN (surface the relevant ones in
+"performance_notes"):
+- Avoid SELECT *; list only the columns needed.
+- Prefer JOINs over correlated subqueries when possible.
+- Avoid functions over indexed columns in WHERE (breaks index usage); rewrite
+  to keep the column bare (e.g. "col >= :from AND col < :to" instead of
+  "DATE(col) = :day").
+- Prefer EXISTS over "IN (large subquery)" when it fits.
+- Warn about a missing WHERE / full table scans.
+- Prefer keyset pagination over large OFFSET when applicable.
+- Suggest indexes (including composite and covering) coherent with the dialect,
+  ordered by selectivity; do not suggest an index that would obviously already
+  exist as a primary key.
+- Consider column types and cardinality from the introspection.
+
+When "Last execution plan (EXPLAIN)" is provided in the context, USE it to
+rewrite/optimise the query (e.g. an index is not used, a sequential scan is
+costly) and explain in "reply"/"performance_notes" what changed and why.
+
+Always respond strictly as JSON with this schema:
+{
+  "reply": "<message shown in the chat, plain prose, in the user's language>",
+  "query": "<optional: the proposed SQL, only when you are proposing one>",
+  "explanation": "<optional: what the query does, in the user's language>",
+  "suggested_indexes": ["<optional DDL, e.g. CREATE INDEX ...>"],
+  "performance_notes": ["<optional: anti-patterns avoided / warnings>"],
+  "assumptions": ["<optional: assumptions made about the schema>"]
+}
+
+Rules for the JSON:
+- "reply" is REQUIRED and must always be non-empty.
+- Omit "query" and the performance fields while you are still gathering
+  information.
+- Whenever you include "query", ALSO include "explanation".`
+
+// queryStudioDialectGuidance returns per-dialect guidance (EXPLAIN syntax,
+// row-limiting, index creation) appended to the prompt so the model produces
+// SQL and index DDL the target database actually accepts. Returns "" for
+// dialects without special rules.
+func queryStudioDialectGuidance(kind string) string {
+	switch kind {
+	case "pg", "postgres", "postgresql":
+		return "Dialect: PostgreSQL. Row limiting: LIMIT n [OFFSET m]. Plan inspection: EXPLAIN (FORMAT JSON) <q>; real: EXPLAIN (ANALYZE, BUFFERS) <q>. Indexes: CREATE INDEX idx_name ON table (col1, col2); partial/expression indexes are available. Prefer keyset pagination over high OFFSET."
+	case "mysql", "mariadb":
+		return "Dialect: MySQL. Row limiting: LIMIT n [OFFSET m]. Plan inspection: EXPLAIN FORMAT=JSON <q>; real (8.0.18+): EXPLAIN ANALYZE <q>. Indexes: CREATE INDEX idx_name ON table (col1, col2). Watch out for implicit type conversions that disable index usage."
+	case "mssql", "sqlserver":
+		return "Dialect: SQL Server. Row limiting: TOP n, or OFFSET m ROWS FETCH NEXT n ROWS ONLY (requires ORDER BY). Plan inspection: SET SHOWPLAN_XML ON (estimated) / actual execution plan. Indexes: CREATE [NONCLUSTERED] INDEX idx_name ON table (col1, col2) INCLUDE (...); use INCLUDE for covering indexes."
+	case "oracle":
+		return "Dialect: Oracle. Row limiting: FETCH FIRST n ROWS ONLY (12c+) or WHERE ROWNUM <= n. Plan inspection: EXPLAIN PLAN FOR <q> + SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY). Indexes: CREATE INDEX idx_name ON table (col1, col2). Avoid functions on indexed columns unless a function-based index exists."
+	case "firebird":
+		return "Dialect: Firebird. Firebird has no schemas — reference every table by its NAME only, never qualified with a schema. Row limiting: FIRST n [SKIP m] or ROWS n. Plan inspection: SET PLAN ON (textual plan). Indexes: CREATE INDEX idx_name ON table (col1, col2). Identifier quoting uses double quotes when needed."
+	}
+	return ""
+}
+
+// QueryStudioChat runs one turn of the Query Studio conversation: it feeds the
+// dialect-aware performance system prompt, the schema, any current query and
+// the last EXPLAIN plan, then returns the structured proposal.
+func (c *Client) QueryStudioChat(ctx context.Context, in QueryStudioInput) (*QueryStudioOutput, error) {
+	var sb strings.Builder
+	sb.WriteString("Connection kind: ")
+	sb.WriteString(in.ConnectionKind)
+	sb.WriteString("\n\nAvailable tables:\n")
+	if len(in.Tables) == 0 {
+		sb.WriteString("(none provided yet — ask the user to load the schema if you need column details)\n")
+	}
+	for _, t := range in.Tables {
+		fmt.Fprintf(&sb, "- %s\n", formatTableForPrompt(t, in.ConnectionKind))
+		for _, col := range t.Columns {
+			fmt.Fprintf(&sb, "    %s %s%s\n", col.Name, col.Type, nullableTag(col.Nullable))
+		}
+	}
+	if in.CurrentQuery != "" {
+		sb.WriteString("\nCurrent query in the editor:\n")
+		sb.WriteString(in.CurrentQuery)
+		sb.WriteString("\n")
+	}
+	if in.ExplainResult != "" {
+		sb.WriteString("\nLast execution plan (EXPLAIN) — use it to optimise:\n")
+		sb.WriteString(truncate(in.ExplainResult, 8000))
+		sb.WriteString("\n")
+	}
+
+	msgs := []Message{
+		{Role: "system", Content: queryStudioSystem},
+		{Role: "system", Content: sb.String()},
+	}
+	if hint := queryStudioDialectGuidance(in.ConnectionKind); hint != "" {
+		msgs = append(msgs, Message{Role: "system", Content: hint})
+	}
+	msgs = append(msgs, in.History...)
+
+	raw, err := c.Chat(ctx, msgs, true)
+	if err != nil {
+		return nil, err
+	}
+	return parseQueryStudioOutput(raw)
+}
+
+// parseQueryStudioOutput decodes and validates the model's JSON response.
+// Extracted from QueryStudioChat so it can be unit-tested without a live LLM.
+func parseQueryStudioOutput(raw string) (*QueryStudioOutput, error) {
+	out := &QueryStudioOutput{}
+	if err := json.Unmarshal([]byte(raw), out); err != nil {
+		return nil, fmt.Errorf("llm output is not valid JSON: %w (raw=%s)", err, truncate(raw, 256))
+	}
+	if out.Reply == "" {
+		return nil, fmt.Errorf("llm returned empty reply")
+	}
+	out.Raw = raw
+	return out, nil
+}
+
 // ============== Code-tool generation ==============
 
 // AvailableConnection describes one connection the JS runtime can target
