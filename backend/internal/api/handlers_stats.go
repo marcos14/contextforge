@@ -9,6 +9,21 @@ import (
 // statsTopTools bounds the size of the by_tool block.
 const statsTopTools = 10
 
+// statsRecentLimit bounds the size of the recent_accesses block.
+const statsRecentLimit = 50
+
+// recentAccessesQuery pulls the latest executions within the window and joins
+// the owning token so we can expose a human label. LEFT JOIN keeps executions
+// whose token was deleted (token_id NULL via ON DELETE SET NULL). Only public
+// token fields (name/prefix) are selected — never the hash/secret.
+const recentAccessesQuery = `
+SELECT t.name, t.prefix, e.tool_slug, e.client_ip, e.occurred_at, e.status
+FROM tool_executions e
+LEFT JOIN tokens t ON e.token_id = t.id
+WHERE e.occurred_at >= $1
+ORDER BY e.occurred_at DESC
+LIMIT $2`
+
 // statsSummary holds the aggregated consumption figures over the window.
 type statsSummary struct {
 	Total        int     `json:"total"`
@@ -31,6 +46,31 @@ type statsByTool struct {
 	ToolSlug string `json:"tool_slug"`
 	Total    int    `json:"total"`
 	Errors   int    `json:"errors"`
+}
+
+// statsRecentAccess is one row of the recent_accesses block: the latest
+// executions attributed to each token (label, tool, client IP, when, status).
+type statsRecentAccess struct {
+	Token      string    `json:"token"`
+	ToolSlug   string    `json:"tool_slug"`
+	ClientIP   string    `json:"client_ip"`
+	OccurredAt time.Time `json:"occurred_at"`
+	Status     string    `json:"status"`
+}
+
+// tokenLabel builds the display label for the token that ran an execution.
+// name/prefix come from a LEFT JOIN, so both are nil when the token was
+// deleted (token_id NULL) — those get a neutral "—" label. When present the
+// prefix is appended for disambiguation. Pure so it can be unit-tested.
+func tokenLabel(name, prefix *string) string {
+	if name == nil {
+		return "—"
+	}
+	label := *name
+	if prefix != nil && *prefix != "" {
+		label += " (" + *prefix + ")"
+	}
+	return label
 }
 
 // resolvePeriod maps a period selector to the window start and the
@@ -71,7 +111,7 @@ func rate(part, total int) float64 {
 // Query params:
 //   - `period` — one of `24h` (default), `7d`, `30d`.
 //
-// Response: {period, summary, timeseries[], by_tool[]}.
+// Response: {period, summary, timeseries[], by_tool[], recent_accesses[]}.
 func (a *API) Stats(w http.ResponseWriter, r *http.Request) {
 	period := strings.TrimSpace(r.URL.Query().Get("period"))
 	since, bucket, ok := resolvePeriod(period, time.Now())
@@ -149,10 +189,40 @@ LIMIT $2`, since, statsTopTools)
 		return
 	}
 
+	// Recent accesses: latest executions per token within the window.
+	recentRows, err := a.Pool.Query(r.Context(), recentAccessesQuery, since, statsRecentLimit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer recentRows.Close()
+
+	recent := []statsRecentAccess{}
+	for recentRows.Next() {
+		var (
+			name, prefix, clientIP *string
+			ra                     statsRecentAccess
+		)
+		if err := recentRows.Scan(&name, &prefix, &ra.ToolSlug, &clientIP, &ra.OccurredAt, &ra.Status); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		ra.Token = tokenLabel(name, prefix)
+		if clientIP != nil {
+			ra.ClientIP = *clientIP
+		}
+		recent = append(recent, ra)
+	}
+	if err := recentRows.Err(); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"period":     period,
-		"summary":    summary,
-		"timeseries": timeseries,
-		"by_tool":    byTool,
+		"period":          period,
+		"summary":         summary,
+		"timeseries":      timeseries,
+		"by_tool":         byTool,
+		"recent_accesses": recent,
 	})
 }

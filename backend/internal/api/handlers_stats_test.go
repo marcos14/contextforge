@@ -1,9 +1,48 @@
 package api
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
+
+func strptr(s string) *string { return &s }
+
+func TestTokenLabel(t *testing.T) {
+	cases := []struct {
+		name   *string
+		prefix *string
+		want   string
+	}{
+		{strptr("prod-api"), strptr("ab12cd34"), "prod-api (ab12cd34)"},
+		{strptr("prod-api"), nil, "prod-api"},
+		{strptr("prod-api"), strptr(""), "prod-api"},
+		{nil, nil, "—"},
+		{nil, strptr("ab12cd34"), "—"},
+	}
+	for _, c := range cases {
+		if got := tokenLabel(c.name, c.prefix); got != c.want {
+			t.Errorf("tokenLabel(%v,%v) = %q, want %q", c.name, c.prefix, got, c.want)
+		}
+	}
+}
+
+// TestRecentAccessesQuery guards the shape of the recent-accesses SQL: it must
+// stay parametrized (no value concatenation), use a LEFT JOIN so executions
+// with a deleted token still appear, and never select the token secret/hash.
+func TestRecentAccessesQuery(t *testing.T) {
+	q := recentAccessesQuery
+	for _, want := range []string{"$1", "$2", "LEFT JOIN tokens", "occurred_at >= $1", "ORDER BY e.occurred_at DESC", "LIMIT $2"} {
+		if !strings.Contains(q, want) {
+			t.Errorf("recentAccessesQuery missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"hashed_secret", "secret"} {
+		if strings.Contains(q, forbidden) {
+			t.Errorf("recentAccessesQuery must not reference %q", forbidden)
+		}
+	}
+}
 
 func TestResolvePeriod(t *testing.T) {
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
