@@ -44,11 +44,20 @@ type StatsByTool = {
   errors: number;
 };
 
+type StatsRecentAccess = {
+  token: string;
+  tool_slug: string;
+  client_ip: string;
+  occurred_at: string;
+  status: string;
+};
+
 type Stats = {
   period: Period;
   summary: StatsSummary;
   timeseries: StatsBucket[];
   by_tool: StatsByTool[];
+  recent_accesses: StatsRecentAccess[];
 };
 
 // Validated chart palette (dataviz skill): blue for executions, red for errors.
@@ -136,6 +145,7 @@ export function DashboardPage() {
     <div className="space-y-6">
       <h2 className="text-2xl font-bold">Dashboard</h2>
       <ConsumptionSection period={period} onPeriodChange={setPeriod} />
+      <RecentAccessesSection period={period} />
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         <Card title="Tools ativas" value={reg.data?.tools_count ?? "—"} />
         <Card title="Tokens ativos" value={reg.data?.tokens ?? "—"} />
@@ -428,6 +438,70 @@ function ConsumptionSection({
 
       {stats.isError && (
         <div className="text-sm text-red-700">Falha ao carregar métricas de consumo.</div>
+      )}
+    </section>
+  );
+}
+
+// Recent accesses panel: latest executions attributed to each token
+// (token label, tool, client IP, when, status), driven by the recent_accesses
+// block of GET /api/stats. Shares the period query key so it dedupes with the
+// consumption section and reacts to the shared period selector.
+function RecentAccessesSection({ period }: { period: Period }) {
+  const stats = useQuery({
+    queryKey: ["stats", period],
+    queryFn: () => api<Stats>(`/api/stats?period=${period}`),
+    placeholderData: keepPreviousData,
+  });
+
+  const rows = stats.data?.recent_accesses ?? [];
+
+  return (
+    <section>
+      <h3 className="font-semibold mb-2">Últimos acessos</h3>
+      <div className="border border-border rounded overflow-x-auto bg-white">
+        <table className="w-full text-sm min-w-[720px]">
+          <thead className="bg-muted">
+            <tr>
+              <th className="text-left p-2 whitespace-nowrap">Quando</th>
+              <th className="text-left p-2">Token</th>
+              <th className="text-left p-2">Tool</th>
+              <th className="text-left p-2">IP</th>
+              <th className="text-left p-2">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const s = (r.status || "").toLowerCase();
+              const ok = s === "ok" || s === "success" || s === "succeeded";
+              return (
+                <tr key={i} className="border-t border-border">
+                  <td
+                    className="p-2 whitespace-nowrap text-xs text-slate-600"
+                    title={fmtDate(r.occurred_at)}
+                  >
+                    {fmtDate(r.occurred_at)}
+                  </td>
+                  <td className="p-2">{r.token || "—"}</td>
+                  <td className="p-2 font-mono">{r.tool_slug}</td>
+                  <td className="p-2 font-mono text-xs">{r.client_ip || "—"}</td>
+                  <td className="p-2">
+                    <Badge variant={ok ? "success" : "danger"}>{r.status}</Badge>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {!stats.isLoading && rows.length === 0 && (
+          <EmptyState
+            title="Sem acessos no período"
+            description="Assim que tokens invocarem tools, os acessos aparecerão aqui."
+          />
+        )}
+      </div>
+      {stats.isError && (
+        <div className="mt-2 text-sm text-red-700">Falha ao carregar últimos acessos.</div>
       )}
     </section>
   );
