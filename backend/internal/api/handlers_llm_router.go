@@ -201,6 +201,7 @@ func (a *API) Mount(r chi.Router) {
 		r.Get("/me", a.Me)
 		r.Get("/registry", a.RegistrySnapshot)
 		r.Get("/executions", a.RecentExecutions)
+		r.Get("/stats", a.Stats)
 	})
 
 	// Editor and admin can manage data.
