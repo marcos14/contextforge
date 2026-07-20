@@ -19,8 +19,12 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { HowToPage } from "./pages/HowToPage";
 import { PublicLayout } from "./components/PublicLayout";
 import { RequireAuth } from "./auth";
+import { isNovember } from "./utils/season";
 
 const qc = new QueryClient();
+
+// Novembro Azul: seasonal blue background, automatic and only during November.
+document.body.classList.toggle("november", isNovember(new Date()));
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
